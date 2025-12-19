@@ -251,6 +251,19 @@ int main(int argc, char **argv)
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+    // This is an MPI benchmark. If you run the binary directly (not under mpiexec),
+    // MPI_COMM_WORLD will typically be size=1. Exit early with a helpful message
+    // to avoid confusing "hang" reports.
+    if (size <= 1)
+    {
+        if (rank == 0)
+        {
+            std::cerr << "warpdes_phold_mpi must be run under MPI (e.g. mpiexec -n 2 ...)\n";
+        }
+        MPI_Finalize();
+        return 2;
+    }
+
     const Params p = parse_args(argc, argv, rank);
 
     auto transport = std::make_shared<warpsim::MpiTransport>(MPI_COMM_WORLD, /*tag=*/0);

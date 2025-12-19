@@ -6,6 +6,8 @@
 #include <mpi.h>
 
 #include <cstdint>
+#include <utility>
+#include <vector>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -28,6 +30,8 @@ namespace warpsim
 
         void send(WireMessage msg) override
         {
+            drain_completed_sends_();
+
             WireWriter w;
             w.write_u8(static_cast<std::uint8_t>(msg.kind));
             w.write_u32(msg.srcRank);
@@ -37,15 +41,22 @@ namespace warpsim
             ByteBuffer buf = w.take();
             const int dst = static_cast<int>(msg.dstRank);
 
-            int rc = MPI_Send(buf.data(), static_cast<int>(buf.size()), MPI_BYTE, dst, m_tag, m_comm);
+            PendingSend pending;
+            pending.buf = std::move(buf);
+            pending.req = MPI_REQUEST_NULL;
+
+            const int rc = MPI_Isend(pending.buf.data(), static_cast<int>(pending.buf.size()), MPI_BYTE, dst, m_tag, m_comm, &pending.req);
             if (rc != MPI_SUCCESS)
             {
-                throw std::runtime_error("MpiTransport: MPI_Send failed");
+                throw std::runtime_error("MpiTransport: MPI_Isend failed");
             }
+            m_pendingSends.push_back(std::move(pending));
         }
 
         std::optional<WireMessage> poll() override
         {
+            drain_completed_sends_();
+
             MPI_Status status;
             int flag = 0;
             int rc = MPI_Iprobe(MPI_ANY_SOURCE, m_tag, m_comm, &flag, &status);
@@ -84,6 +95,8 @@ namespace warpsim
 
         bool has_pending() const override
         {
+            drain_completed_sends_();
+
             MPI_Status status;
             int flag = 0;
             int rc = MPI_Iprobe(MPI_ANY_SOURCE, m_tag, m_comm, &flag, &status);
@@ -91,11 +104,46 @@ namespace warpsim
             {
                 return false;
             }
-            return flag != 0;
+
+            if (flag != 0)
+            {
+                return true;
+            }
+            return !m_pendingSends.empty();
         }
 
     private:
+        struct PendingSend
+        {
+            ByteBuffer buf;
+            MPI_Request req = MPI_REQUEST_NULL;
+        };
+
+        void drain_completed_sends_() const
+        {
+            for (std::size_t i = 0; i < m_pendingSends.size();)
+            {
+                int done = 0;
+                const int rc = MPI_Test(&m_pendingSends[i].req, &done, MPI_STATUS_IGNORE);
+                if (rc != MPI_SUCCESS)
+                {
+                    throw std::runtime_error("MpiTransport: MPI_Test failed");
+                }
+                if (done)
+                {
+                    m_pendingSends[i] = std::move(m_pendingSends.back());
+                    m_pendingSends.pop_back();
+                    continue;
+                }
+                ++i;
+            }
+        }
+
         MPI_Comm m_comm;
         int m_tag = 0;
+
+        // Mutable because has_pending() and poll() are logically const but need to
+        // advance completion of in-flight nonblocking sends.
+        mutable std::vector<PendingSend> m_pendingSends;
     };
 }

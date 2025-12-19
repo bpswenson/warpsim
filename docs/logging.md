@@ -2,6 +2,8 @@
 
 WarpSim includes a small built-in logger in `src/log.hpp`.
 
+If you need rollback-safe printing/metrics/file output from model code, also see [committed_output.md](committed_output.md).
+
 ## Enable
 
 Set `SimulationConfig::logLevel`:
@@ -32,6 +34,9 @@ Log lines are prefixed with:
 - simulation timestamp (time.sequence)
 
 This is intended for debugging kernel behavior (rollbacks, anti-cancels, etc.).
+
+Note: direct logging from inside an LP’s `on_event()` can be replayed during rollback.
+For “print this once” style output, use committed output.
 
 ## When to use an external library
 

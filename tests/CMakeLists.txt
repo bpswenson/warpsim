@@ -34,6 +34,24 @@ add_executable(warpdes_optimistic_migration_directory_test
 target_link_libraries(warpdes_optimistic_migration_directory_test PRIVATE warpdes)
 add_test(NAME warpdes.optimistic_migration_directory COMMAND warpdes_optimistic_migration_directory_test)
 
+add_executable(warpdes_uid_determinism_test
+	uid_determinism_test.cpp
+)
+target_link_libraries(warpdes_uid_determinism_test PRIVATE warpdes)
+add_test(NAME warpdes.uid_determinism COMMAND warpdes_uid_determinism_test)
+
+add_executable(warpdes_run_one_rollback_test
+	run_one_rollback_test.cpp
+)
+target_link_libraries(warpdes_run_one_rollback_test PRIVATE warpdes)
+add_test(NAME warpdes.run_one_rollback COMMAND warpdes_run_one_rollback_test)
+
+add_executable(warpdes_committed_output_test
+	committed_output_test.cpp
+)
+target_link_libraries(warpdes_committed_output_test PRIVATE warpdes)
+add_test(NAME warpdes.committed_output COMMAND warpdes_committed_output_test)
+
 if(WARPSIM_ENABLE_MPI_TESTS)
 	add_executable(warpdes_mpi_smoke_test
 		mpi_smoke_test.cpp

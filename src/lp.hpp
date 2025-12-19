@@ -19,6 +19,15 @@ namespace warpsim
         // Request write access to an entity by id. The kernel may snapshot the entity
         // the first time this is called per (event, entity).
         virtual void request_write(EntityId id) = 0;
+
+        // Record a committed (GVT-safe) side-effect to be emitted by the kernel once it is safe.
+        //
+        // This should be used for any non-rollbackable effects such as printing, logging,
+        // writing files, external metrics, etc.
+        //
+        // The kernel guarantees this payload is only delivered once the event is irrevocable
+        // (i.e., once its timestamp is strictly less than the global virtual time).
+        virtual void emit_committed(TimeStamp ts, Payload payload) = 0;
     };
 
     class ILogicalProcess

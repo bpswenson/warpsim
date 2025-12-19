@@ -1,5 +1,7 @@
 #include "aoi_lp.hpp"
+#include "aoi_client.hpp"
 #include "event_dispatcher.hpp"
+#include "random.hpp"
 #include "simulation.hpp"
 #include "transport.hpp"
 
@@ -103,6 +105,10 @@ namespace
     public:
         AircraftLP(warpsim::LPId id, warpsim::LPId aoiLp) : m_id(id), m_aoi(aoiLp)
         {
+            m_aoiClient.aoiLp = aoiLp;
+            m_aoiClient.updateKind = Aoi_Update;
+            m_aoiClient.queryKind = Aoi_Query;
+
             m_state.pos = (m_id == 1) ? warpsim::Vec3{0, 0, 0} : warpsim::Vec3{1200, 0, 0};
 
             m_dispatcher.register_trivial<MoveArgs>(Aircraft_Move,
@@ -173,22 +179,14 @@ namespace
     private:
         void publish_pos_(warpsim::IEventContext &ctx, warpsim::TimeStamp ts, warpsim::Vec3 pos)
         {
-            warpsim::Event ev;
-            ev.ts = ts;
-            ev.src = m_id;
-            ev.dst = m_aoi;
-            ev.payload.kind = Aoi_Update;
-            warpsim::AoiLP::UpdateArgs u;
-            u.entity = aircraft_entity();
-            u.pos = pos;
-            ev.payload.bytes = warpsim::bytes_from_trivially_copyable(u);
-            ctx.send(std::move(ev));
+            m_aoiClient.send_update(ctx, ts, m_id, aircraft_entity(), pos);
         }
 
         static constexpr warpsim::EntityId kStateEntity = 0xACACAC01ULL;
 
         warpsim::LPId m_id = 0;
         warpsim::LPId m_aoi = 0;
+        warpsim::AoiClient m_aoiClient;
         warpsim::EventDispatcher<Aircraft> m_dispatcher;
         Aircraft m_state{};
     };
@@ -196,9 +194,12 @@ namespace
     class DriverLP final : public warpsim::ILogicalProcess
     {
     public:
-        DriverLP(warpsim::LPId id, warpsim::LPId aoi, warpsim::LPId shooterLp, warpsim::LPId targetLp)
-            : m_id(id), m_aoi(aoi), m_shooterLp(shooterLp), m_targetLp(targetLp)
+        DriverLP(warpsim::LPId id, warpsim::LPId aoi, warpsim::LPId shooterLp, warpsim::LPId targetLp, std::uint64_t seed)
+            : m_id(id), m_aoi(aoi), m_shooterLp(shooterLp), m_targetLp(targetLp), m_seed(seed)
         {
+            m_aoiClient.aoiLp = aoi;
+            m_aoiClient.updateKind = Aoi_Update;
+            m_aoiClient.queryKind = Aoi_Query;
         }
 
         warpsim::LPId id() const noexcept override { return m_id; }
@@ -253,7 +254,7 @@ namespace
             {
                 // Cone query in +X with 60deg half-angle, range 1500.
                 warpsim::AoiLP::QueryArgs q;
-                q.requestId = 1;
+                q.requestId = (1ULL << 62) | (static_cast<std::uint64_t>(ev.uid) & ((1ULL << 62) - 1));
                 q.self = make_id(m_shooterLp, 1);
                 q.shape = warpsim::AoiLP::QueryShape::Cone;
                 q.origin = warpsim::Vec3{0, 0, 0};
@@ -261,13 +262,7 @@ namespace
                 q.range = 1500.0;
                 q.cosHalfAngle = std::cos(60.0 * 3.141592653589793 / 180.0);
 
-                warpsim::Event qe;
-                qe.ts = ev.ts;
-                qe.src = m_id;
-                qe.dst = m_aoi;
-                qe.payload.kind = Aoi_Query;
-                qe.payload.bytes = warpsim::bytes_from_trivially_copyable(q);
-                ctx.send(std::move(qe));
+                m_aoiClient.send_query(ctx, ev.ts, m_id, q);
                 return;
             }
 
@@ -275,47 +270,29 @@ namespace
             {
                 // Sphere query centered near shooter, radius 600.
                 warpsim::AoiLP::QueryArgs q;
-                q.requestId = 2;
+                q.requestId = (2ULL << 62) | (static_cast<std::uint64_t>(ev.uid) & ((1ULL << 62) - 1));
                 q.self = 0;
                 q.shape = warpsim::AoiLP::QueryShape::Sphere;
-                q.origin = warpsim::Vec3{200, 0, 0};
+
+                // Deterministic jitter to demonstrate rollback-safe RNG.
+                // Keyed off (seed, LPId, event uid) so it doesn't depend on rank or execution order.
+                const double u = warpsim::rng_unit_double(m_seed, m_id, /*stream=*/1, ev.uid, /*draw=*/0);
+                const double jitter = (u * 2.0 - 1.0) * 10.0; // [-10,+10]
+                q.origin = warpsim::Vec3{200.0 + jitter, 0, 0};
                 q.radius = 600.0;
 
-                warpsim::Event qe;
-                qe.ts = ev.ts;
-                qe.src = m_id;
-                qe.dst = m_aoi;
-                qe.payload.kind = Aoi_Query;
-                qe.payload.bytes = warpsim::bytes_from_trivially_copyable(q);
-                ctx.send(std::move(qe));
+                m_aoiClient.send_query(ctx, ev.ts, m_id, q);
                 return;
             }
 
             if (ev.payload.kind == Aoi_Result)
             {
-                if (ev.payload.bytes.size() < sizeof(warpsim::AoiLP::ResultHeader))
-                {
-                    throw std::runtime_error("DriverLP: bad AOI result");
-                }
+                const auto res = warpsim::AoiClient::decode_result(ev.payload);
 
-                warpsim::AoiLP::ResultHeader h{};
-                std::memcpy(&h, ev.payload.bytes.data(), sizeof(h));
-
-                const std::size_t expected = sizeof(h) + static_cast<std::size_t>(h.count) * sizeof(warpsim::EntityId);
-                if (ev.payload.bytes.size() != expected)
+                const std::uint64_t tag = res.requestId >> 62;
+                if (tag == 1)
                 {
-                    throw std::runtime_error("DriverLP: bad AOI result size");
-                }
-
-                std::vector<warpsim::EntityId> ids(h.count);
-                if (h.count != 0)
-                {
-                    std::memcpy(ids.data(), ev.payload.bytes.data() + sizeof(h), ids.size() * sizeof(warpsim::EntityId));
-                }
-
-                if (h.requestId == 1)
-                {
-                    for (std::uint32_t i = 0; i < h.count; ++i)
+                    for (std::size_t i = 0; i < res.entities.size(); ++i)
                     {
                         warpsim::Event out;
                         out.ts = ev.ts;
@@ -323,17 +300,17 @@ namespace
                         out.dst = m_shooterLp;
                         out.target = 0;
                         out.payload.kind = Radar_Contacts;
-                        out.payload.bytes = warpsim::bytes_from_trivially_copyable(ContactsArgs{.requestId = h.requestId, .count = 1});
+                        out.payload.bytes = warpsim::bytes_from_trivially_copyable(ContactsArgs{.requestId = res.requestId, .count = 1});
                         ctx.send(std::move(out));
                     }
                     return;
                 }
 
-                if (h.requestId == 2)
+                if (tag == 2)
                 {
-                    for (std::uint32_t i = 0; i < h.count; ++i)
+                    for (std::size_t i = 0; i < res.entities.size(); ++i)
                     {
-                        const warpsim::EntityId e = ids[static_cast<std::size_t>(i)];
+                        const warpsim::EntityId e = res.entities[i];
                         const warpsim::LPId owner = static_cast<warpsim::LPId>(e >> 32);
 
                         warpsim::Event out;
@@ -342,7 +319,7 @@ namespace
                         out.dst = owner;
                         out.target = 0;
                         out.payload.kind = Explosion_Affect;
-                        out.payload.bytes = warpsim::bytes_from_trivially_copyable(AffectArgs{.requestId = h.requestId, .count = 1});
+                        out.payload.bytes = warpsim::bytes_from_trivially_copyable(AffectArgs{.requestId = res.requestId, .count = 1});
                         ctx.send(std::move(out));
                     }
                     return;
@@ -369,15 +346,20 @@ namespace
 
         warpsim::LPId m_id = 0;
         warpsim::LPId m_aoi = 0;
+        warpsim::AoiClient m_aoiClient;
         warpsim::LPId m_shooterLp = 0;
         warpsim::LPId m_targetLp = 0;
+        std::uint64_t m_seed = 1;
     };
 }
 
 int main()
 {
     auto transport = std::make_shared<ThrottledInProcTransport>();
-    warpsim::Simulation sim(warpsim::SimulationConfig{.rank = 0}, transport);
+    warpsim::SimulationConfig cfg;
+    cfg.rank = 0;
+    cfg.seed = 1;
+    warpsim::Simulation sim(cfg, transport);
 
     // AOI LP (id=10).
     warpsim::AoiLP::Config aoiCfg;
@@ -398,32 +380,18 @@ int main()
     sim.add_lp(std::move(target));
 
     // Driver emits pings/explosions and consumes AOI results.
-    sim.add_lp(std::make_unique<DriverLP>(3, /*aoi=*/10, /*shooterLp=*/1, /*targetLp=*/2));
+    sim.add_lp(std::make_unique<DriverLP>(3, /*aoi=*/10, /*shooterLp=*/1, /*targetLp=*/2, cfg.seed));
 
     // Deterministically seed AOI positions before any LP on_start() runs.
+    warpsim::AoiClient aoiClient;
+    aoiClient.aoiLp = 10;
+    aoiClient.updateKind = Aoi_Update;
+    aoiClient.queryKind = Aoi_Query;
     {
-        warpsim::Event ev;
-        ev.ts = warpsim::TimeStamp{0, 0};
-        ev.src = 1;
-        ev.dst = 10;
-        ev.payload.kind = Aoi_Update;
-        warpsim::AoiLP::UpdateArgs u;
-        u.entity = shooterP->aircraft_entity();
-        u.pos = shooterP->pos();
-        ev.payload.bytes = warpsim::bytes_from_trivially_copyable(u);
-        sim.send(std::move(ev));
+        aoiClient.send_update(sim, warpsim::TimeStamp{0, 0}, /*srcLp=*/1, shooterP->aircraft_entity(), shooterP->pos());
     }
     {
-        warpsim::Event ev;
-        ev.ts = warpsim::TimeStamp{0, 0};
-        ev.src = 2;
-        ev.dst = 10;
-        ev.payload.kind = Aoi_Update;
-        warpsim::AoiLP::UpdateArgs u;
-        u.entity = targetP->aircraft_entity();
-        u.pos = targetP->pos();
-        ev.payload.bytes = warpsim::bytes_from_trivially_copyable(u);
-        sim.send(std::move(ev));
+        aoiClient.send_update(sim, warpsim::TimeStamp{0, 0}, /*srcLp=*/2, targetP->aircraft_entity(), targetP->pos());
     }
 
     sim.run();

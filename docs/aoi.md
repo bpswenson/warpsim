@@ -5,6 +5,10 @@ Instead, keep a rollback-safe spatial index in a dedicated Logical Process (LP),
 
 This pattern is generic for things like radar, explosions, visibility, proximity chat, and any one-to-many mechanic.
 
+Note: the `AoiLP` implementation and the `AoiClient` helper are **convenience utilities** provided by this repo.
+They’re not “magic kernel features” — they just package up a modeling pattern that you can implement yourself:
+maintain some rollback-safe state, answer deterministic queries, and then fan out regular events based on the results.
+
 ## Protocol
 
 The AOI LP supports a simple 3-message protocol:
@@ -71,3 +75,14 @@ This keeps the core kernel simple and makes rollback correct “for free” beca
 - Keep the AOI LP’s payloads trivially-copyable (they are), and keep all fanout logic in one place (a single “driver/weapon” LP).
 - Use deterministic `EntityId` assignment (like `(ownerLPId<<32)|localId`) so hit lists are stable.
 - If you want late-message/rollback stress tests, use a throttled transport in the example, but for “smoke tests” prefer FIFO delivery.
+
+## Helpers
+
+- If you want less boilerplate for sending AOI updates/queries and decoding results, use the small convenience wrapper in `src/aoi_client.hpp`.
+- For random numbers in models, use the stateless RNG helpers described in [random.md](random.md).
+
+If your model already has its own spatial index, routing layer, or “interest management” system, you can skip `AoiLP` entirely and still follow the same pattern.
+
+## Testing and demos
+
+If you want to write explicit rollback demonstrations/tests (e.g., inject a straggler after processing a later event), you can step the kernel one event at a time with `Simulation::run_one()`.

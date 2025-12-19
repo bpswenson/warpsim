@@ -7,6 +7,7 @@
 #include "migration.hpp"
 #include "transport.hpp"
 
+#include <algorithm>
 #include <deque>
 #include <functional>
 #include <limits>
@@ -84,8 +85,20 @@ namespace warpsim
         // Larger values reduce collective overhead but delay GVT advancement and termination.
         std::uint64_t collectivePeriodIters = 1;
 
+        // Global deterministic seed for model RNG.
+        // Models should derive random values from this seed + LPId + EventUid so results
+        // are deterministic across rollback and MPI rank remaps.
+        std::uint64_t seed = 1;
+
         // Logging (disabled by default).
         LogLevel logLevel = LogLevel::Off;
+
+        // Optional sink for committed (GVT-safe) side effects.
+        //
+        // If set, the kernel will deliver committed payloads in deterministic order once they are
+        // safe (event timestamp < global virtual time). This prevents duplicate side effects when
+        // optimistic execution rolls back.
+        std::function<void(RankId, LPId, TimeStamp, const Payload &)> committedSink;
     };
 
     // Minimal optimistic Time Warp (single-rank core) with explicit transport hooks.
@@ -163,15 +176,21 @@ namespace warpsim
         }
 
         // Drain transport -> enqueue messages.
-        void poll_transport()
+        void poll_transport() { (void)poll_transport_count(); }
+
+        // Drain transport -> enqueue messages and return the number of wire messages consumed.
+        std::size_t poll_transport_count()
         {
+            std::size_t polled = 0;
             while (true)
             {
                 auto msg = m_transport->poll();
                 if (!msg)
                 {
-                    return;
+                    return polled;
                 }
+
+                ++polled;
 
                 if (msg->kind == MessageKind::Event)
                 {
@@ -235,11 +254,15 @@ namespace warpsim
         // Runs until no pending events and no incoming messages.
         void run()
         {
-            // allow LPs to seed work
-            for (auto &[id, ctx] : m_lps)
+            start_if_needed_();
+
+            const auto finalize_at_end = [&]()
             {
-                ctx.lp->on_start(*this);
-            }
+                // Once the simulation has globally terminated, no further events can arrive.
+                // Flush any remaining committed output and release history.
+                prune_to_gvt_(max_stamp_());
+                apply_ready_migrations_();
+            };
 
             const std::uint64_t period = (m_cfg.collectivePeriodIters == 0) ? 1 : m_cfg.collectivePeriodIters;
             std::uint64_t iters = 0;
@@ -296,6 +319,7 @@ namespace warpsim
                     }
                     if (!m_cfg.anyRankHasWork(localHasWork))
                     {
+                        finalize_at_end();
                         return;
                     }
                     continue;
@@ -303,9 +327,34 @@ namespace warpsim
 
                 if (!localHasWork)
                 {
+                    finalize_at_end();
                     return;
                 }
             }
+        }
+
+        // Step the simulation by at most one dispatched event.
+        //
+        // Useful for explicit rollback/determinism demonstrations and unit tests.
+        // Returns true if any progress was made (transport message consumed or event dispatched).
+        bool run_one(bool doCollectives = false)
+        {
+            start_if_needed_();
+
+            bool progressed = (poll_transport_count() != 0);
+
+            if (!m_pending.empty())
+            {
+                auto ev = pop_next_();
+                if (ev)
+                {
+                    dispatch_(*ev);
+                    progressed = true;
+                }
+            }
+
+            fossil_collect_(doCollectives);
+            return progressed;
         }
 
         Stats stats() const
@@ -352,7 +401,12 @@ namespace warpsim
                 // Also keep them deterministic regardless of MPI rank mapping.
                 // Format: [src LPId:32][per-LP counter:32].
                 auto &ctx = ctx_(ev.src);
-                ev.uid = (static_cast<std::uint64_t>(ev.src) << 32) | static_cast<std::uint64_t>(ctx.nextUid++);
+                if (ctx.nextUid == 0)
+                {
+                    throw std::runtime_error("Event UID counter overflow for LPId (exhausted 2^32-1 UIDs)");
+                }
+                const std::uint32_t local = ctx.nextUid++;
+                ev.uid = (static_cast<std::uint64_t>(ev.src) << 32) | static_cast<std::uint64_t>(local);
             }
 
             // Auto-assign sequence if caller didn't set it.
@@ -428,6 +482,21 @@ namespace warpsim
         }
 
     private:
+        struct CommittedOutput
+        {
+            TimeStamp ts;
+            Payload payload;
+        };
+
+        struct CommittedFlushItem
+        {
+            TimeStamp ts;
+            LPId lp = 0;
+            EventUid eventUid = 0;
+            std::uint32_t index = 0;
+            Payload payload;
+        };
+
         struct InflightKey
         {
             EventUid uid = 0;
@@ -458,9 +527,18 @@ namespace warpsim
         struct ProcessedRecord
         {
             Event ev;
+
+            // Rollback-able kernel metadata.
+            // This is separate from Event.uid (which must never be reused).
+            std::uint64_t preNextSeq = 1;
+
             bool hasLpSnapshot = false;
             ByteBuffer preLpState;
             std::unordered_map<EntityId, ByteBuffer> preEntityState;
+
+            // Committed side-effects recorded during this event execution.
+            // These are only emitted once the record is fossil-collected (ts < GVT).
+            std::vector<CommittedOutput> committed;
         };
 
         struct LPContext
@@ -601,13 +679,30 @@ namespace warpsim
 
         void prune_to_gvt_(TimeStamp gvt)
         {
+            std::vector<CommittedFlushItem> flush;
             for (auto &[id, ctx] : m_lps)
             {
                 (void)id;
 
                 while (!ctx.processed.empty() && ctx.processed.front().ev.ts < gvt)
                 {
+                    auto rec = std::move(ctx.processed.front());
                     ctx.processed.pop_front();
+
+                    if (m_cfg.committedSink)
+                    {
+                        for (std::size_t i = 0; i < rec.committed.size(); ++i)
+                        {
+                            auto &c = rec.committed[i];
+                            flush.push_back(CommittedFlushItem{
+                                .ts = c.ts,
+                                .lp = id,
+                                .eventUid = rec.ev.uid,
+                                .index = static_cast<std::uint32_t>(i),
+                                .payload = std::move(c.payload),
+                            });
+                        }
+                    }
                 }
 
                 while (!ctx.sentLog.empty() && ctx.sentLog.front().ts < gvt)
@@ -625,6 +720,34 @@ namespace warpsim
                 else
                 {
                     ++it;
+                }
+            }
+
+            if (m_cfg.committedSink && !flush.empty())
+            {
+                std::sort(flush.begin(), flush.end(), [](const CommittedFlushItem &a, const CommittedFlushItem &b)
+                          {
+                              if (a.ts < b.ts)
+                              {
+                                  return true;
+                              }
+                              if (b.ts < a.ts)
+                              {
+                                  return false;
+                              }
+                              if (a.lp != b.lp)
+                              {
+                                  return a.lp < b.lp;
+                              }
+                              if (a.eventUid != b.eventUid)
+                              {
+                                  return a.eventUid < b.eventUid;
+                              }
+                              return a.index < b.index; });
+
+                for (auto &it : flush)
+                {
+                    m_cfg.committedSink(m_cfg.rank, it.lp, it.ts, it.payload);
                 }
             }
         }
@@ -822,6 +945,7 @@ namespace warpsim
 
             ProcessedRecord rec;
             rec.ev = ev;
+            rec.preNextSeq = dstCtx.nextSeq;
 
             class EventContext final : public IEventContext
             {
@@ -848,6 +972,16 @@ namespace warpsim
                         m_rec.hasLpSnapshot = true;
                         m_rec.preLpState = m_lpCtx.lp->save_state();
                     }
+                }
+
+                void emit_committed(TimeStamp ts, Payload payload) override
+                {
+                    // Keep the API simple: committed output is tied to the current event timestamp.
+                    if (!(ts == m_rec.ev.ts))
+                    {
+                        throw std::runtime_error("emit_committed: ts must match the current event timestamp");
+                    }
+                    m_rec.committed.push_back(CommittedOutput{ts, std::move(payload)});
                 }
 
             private:
@@ -921,6 +1055,10 @@ namespace warpsim
             {
                 // Restore LP snapshot if we have one (oldest undone record).
                 const auto &oldest = undone.back();
+
+                // Restore rollback-able kernel metadata.
+                ctx.nextSeq = oldest.preNextSeq;
+
                 if (oldest.hasLpSnapshot)
                 {
                     ctx.lp->load_state(std::span<const std::byte>(oldest.preLpState.data(), oldest.preLpState.size()));
@@ -984,10 +1122,27 @@ namespace warpsim
 
         LPId m_systemSrc = 0;
         bool m_systemSrcSet = false;
+        bool m_started = false;
         std::priority_queue<Event, std::vector<Event>, PendingOrder> m_pending;
 
         // Tombstones for cancelled UIDs (anti-messages). Timestamp used for fossil collection.
         std::unordered_map<EventUid, TimeStamp> m_cancelledByUid;
+
+        void start_if_needed_()
+        {
+            if (m_started)
+            {
+                return;
+            }
+            m_started = true;
+
+            // allow LPs to seed work
+            for (auto &[id, ctx] : m_lps)
+            {
+                (void)id;
+                ctx.lp->on_start(*this);
+            }
+        }
 
         // GVT-safe entity migration: migrations are applied only once GVT >= effectiveTs.
         std::multimap<TimeStamp, Migration> m_pendingMigrations;
