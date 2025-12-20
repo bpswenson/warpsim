@@ -440,11 +440,42 @@ namespace warpsim
                 }
             }
 
-            // Local rank routing for now (multirank caller can plug in rank mapping).
+            const RankId dstRank = m_cfg.lpToRank ? m_cfg.lpToRank(ev.dst) : m_cfg.rank;
+
+            // Short-circuit local deliveries: enqueue directly instead of sending through
+            // the transport. This avoids MPI self-send/local-send quirks and keeps local
+            // causality within the rank.
+            if (dstRank == m_cfg.rank)
+            {
+                if (m_cfg.gvtMode != SimulationConfig::GvtMode::AckInflight)
+                {
+                    ev.gvtColor = m_gvtColor;
+                }
+
+                if (ev.isAnti)
+                {
+                    ++m_sentAnti;
+                }
+                else
+                {
+                    ++m_sentEvents;
+                }
+                enqueue_(std::move(ev));
+
+                // Log for potential rollback -> anti-messages.
+                if (!ev.isAnti)
+                {
+                    auto &ctx = ctx_(ev.src);
+                    const TimeStamp sendTime = ctx.inEvent ? ctx.currentExecTs : TimeStamp{0, 0};
+                    ctx.sentLog.push_back(SentRecord{sendTime, ev.ts, ev.dst, ev.uid});
+                }
+                return;
+            }
+
             WireMessage msg;
             msg.kind = MessageKind::Event;
             msg.srcRank = m_cfg.rank;
-            msg.dstRank = m_cfg.lpToRank ? m_cfg.lpToRank(ev.dst) : m_cfg.rank;
+            msg.dstRank = dstRank;
             msg.bytes = encode_event(ev);
 
             if (m_cfg.gvtMode == SimulationConfig::GvtMode::AckInflight)
@@ -477,7 +508,8 @@ namespace warpsim
             if (!ev.isAnti)
             {
                 auto &ctx = ctx_(ev.src);
-                ctx.sentLog.push_back(SentRecord{ev.ts, ev.dst, ev.uid});
+                const TimeStamp sendTime = ctx.inEvent ? ctx.currentExecTs : TimeStamp{0, 0};
+                ctx.sentLog.push_back(SentRecord{sendTime, ev.ts, ev.dst, ev.uid});
             }
         }
 
@@ -519,7 +551,13 @@ namespace warpsim
 
         struct SentRecord
         {
-            TimeStamp ts;
+            // Timestamp of the event being executed when this message was sent.
+            // Rollback cancels messages based on this value.
+            TimeStamp sendTime;
+
+            // Timestamp of the message itself (its delivery timestamp at the receiver).
+            TimeStamp msgTime;
+
             LPId dst;
             EventUid uid;
         };
@@ -539,12 +577,21 @@ namespace warpsim
             // Committed side-effects recorded during this event execution.
             // These are only emitted once the record is fossil-collected (ts < GVT).
             std::vector<CommittedOutput> committed;
+
+            // Anti-message bookkeeping (rollbackable).
+            // If ev.isAnti is true, we record the prior state of the cancellation map for ev.uid
+            // so rollback can restore it.
+            bool cancelHadEntry = false;
+            TimeStamp cancelPrevTs{0, 0};
         };
 
         struct LPContext
         {
             std::unique_ptr<ILogicalProcess> lp;
             TimeStamp vt{0, 0};
+
+            bool inEvent = false;
+            TimeStamp currentExecTs{0, 0};
 
             std::deque<ProcessedRecord> processed;
             std::deque<SentRecord> sentLog;
@@ -670,10 +717,8 @@ namespace warpsim
                 gvt = min_stamp_(gvt, *m_inflightTs.begin());
             }
 
-            if (gvt == max_stamp_())
-            {
-                return TimeStamp{0, 0};
-            }
+            // If we have no local information about any outstanding work, contribute +inf
+            // so global min-reduction is driven by ranks that still have work.
             return gvt;
         }
 
@@ -705,7 +750,7 @@ namespace warpsim
                     }
                 }
 
-                while (!ctx.sentLog.empty() && ctx.sentLog.front().ts < gvt)
+                while (!ctx.sentLog.empty() && ctx.sentLog.front().sendTime < gvt)
                 {
                     ctx.sentLog.pop_front();
                 }
@@ -910,7 +955,7 @@ namespace warpsim
             {
                 Event ev = m_pending.top();
                 m_pending.pop();
-                if (m_cancelledByUid.count(ev.uid) != 0)
+                if (!ev.isAnti && m_cancelledByUid.count(ev.uid) != 0)
                 {
                     continue;
                 }
@@ -924,7 +969,35 @@ namespace warpsim
             // Anti-messages cancel a matching event if still pending or unprocessed.
             if (ev.isAnti)
             {
+                auto &dstCtx = ctx_(ev.dst);
+
+                // Anti-messages are still time-stamped inputs. If they arrive in the past
+                // relative to this LP's current virtual time, roll back and reschedule.
+                if (ev.ts < dstCtx.vt)
+                {
+                    ++m_rollbacksStraggler;
+                    rollback_(dstCtx, ev.ts);
+                    enqueue_(ev);
+                    return;
+                }
+
+                ProcessedRecord rec;
+                rec.ev = ev;
+                rec.preNextSeq = dstCtx.nextSeq;
+
+                if (auto it = m_cancelledByUid.find(ev.uid); it != m_cancelledByUid.end())
+                {
+                    rec.cancelHadEntry = true;
+                    rec.cancelPrevTs = it->second;
+                }
+
                 cancel_(ev);
+
+                // Advance local virtual time: anti-messages are processed at their timestamp.
+                dstCtx.vt = ev.ts;
+
+                // Record anti processing so its cancellation effect can be rolled back.
+                dstCtx.processed.push_back(std::move(rec));
                 return;
             }
 
@@ -941,6 +1014,12 @@ namespace warpsim
                                         static_cast<unsigned long long>(ev.uid),
                                         static_cast<unsigned>(ev.src));
                 rollback_(dstCtx, ev.ts);
+
+                // After rolling back, re-enqueue the straggler and let the scheduler
+                // select the next event in timestamp order. This avoids processing the
+                // straggler out-of-order relative to other events reintroduced by rollback.
+                enqueue_(ev);
+                return;
             }
 
             ProcessedRecord rec;
@@ -993,7 +1072,10 @@ namespace warpsim
             EventContext ctx(*this, dstCtx, rec);
 
             dstCtx.vt = ev.ts;
+            dstCtx.inEvent = true;
+            dstCtx.currentExecTs = ev.ts;
             dstCtx.lp->on_event(ev, ctx);
+            dstCtx.inEvent = false;
             dstCtx.processed.push_back(std::move(rec));
 
             ++m_totalProcessed;
@@ -1013,7 +1095,9 @@ namespace warpsim
             auto &dstCtx = ctx_(anti.dst);
             for (auto it = dstCtx.processed.rbegin(); it != dstCtx.processed.rend(); ++it)
             {
-                if (it->ev.uid == anti.uid)
+                // Match only the original (non-anti) event. Anti-messages reuse the cancelled
+                // event's UID, so matching anti records here would cause spurious rollbacks.
+                if (!it->ev.isAnti && it->ev.uid == anti.uid)
                 {
                     ++m_antiCancelledProcessed;
                     ++m_rollbacksAnti;
@@ -1044,6 +1128,20 @@ namespace warpsim
                 {
                     break;
                 }
+
+                // Undo rollbackable kernel effects of anti-messages.
+                if (last.ev.isAnti)
+                {
+                    if (last.cancelHadEntry)
+                    {
+                        m_cancelledByUid[last.ev.uid] = last.cancelPrevTs;
+                    }
+                    else
+                    {
+                        m_cancelledByUid.erase(last.ev.uid);
+                    }
+                }
+
                 undone.push_back(ctx.processed.back());
                 enqueue_(ctx.processed.back().ev);
                 ctx.processed.pop_back();
@@ -1053,15 +1151,27 @@ namespace warpsim
 
             if (!undone.empty())
             {
-                // Restore LP snapshot if we have one (oldest undone record).
+                // Restore kernel metadata from the oldest undone record.
                 const auto &oldest = undone.back();
 
                 // Restore rollback-able kernel metadata.
                 ctx.nextSeq = oldest.preNextSeq;
 
-                if (oldest.hasLpSnapshot)
+                // Restore LP state. The oldest undone record may be an anti-message (no snapshot),
+                // but later undone records may have mutated state. Use the oldest undone record
+                // that captured a snapshot.
+                const ProcessedRecord *snap = nullptr;
+                for (auto it = undone.rbegin(); it != undone.rend(); ++it)
                 {
-                    ctx.lp->load_state(std::span<const std::byte>(oldest.preLpState.data(), oldest.preLpState.size()));
+                    if (it->hasLpSnapshot)
+                    {
+                        snap = &(*it);
+                        break;
+                    }
+                }
+                if (snap)
+                {
+                    ctx.lp->load_state(std::span<const std::byte>(snap->preLpState.data(), snap->preLpState.size()));
                 }
 
                 if (ctx.lp->supports_entity_snapshots())
@@ -1088,13 +1198,13 @@ namespace warpsim
             while (!ctx.sentLog.empty())
             {
                 const auto &last = ctx.sentLog.back();
-                if (last.ts < to)
+                if (last.sendTime < to)
                 {
                     break;
                 }
 
                 Event anti;
-                anti.ts = last.ts;
+                anti.ts = last.msgTime;
                 anti.src = ctx.lp->id();
                 anti.dst = last.dst;
                 anti.target = 0;

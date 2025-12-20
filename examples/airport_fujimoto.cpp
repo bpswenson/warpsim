@@ -322,6 +322,8 @@ namespace
                 }
                 return;
             }
+
+            throw std::runtime_error("airport: unexpected event kind");
         }
 
         warpsim::ByteBuffer save_state() const override
@@ -483,50 +485,12 @@ int main(int argc, char **argv)
 
     const warpsim::LPId driverId = static_cast<warpsim::LPId>(1 + p.airports);
 
-#if defined(WARPSIM_HAS_MPI)
-    // NOTE: This example is intended to be deterministic across MPI rank counts.
-    // Today we run the full model on rank 0 and broadcast a deterministic summary
-    // (including committed-output hash) for verification. This keeps the example
-    // usable under mpiexec while avoiding multi-rank optimistic rollback thrash for
-    // this specific workload.
-    if (size > 1 && rank != 0)
-    {
-        std::uint64_t globalHash = 0;
-        std::uint64_t totalArrivals = 0;
-        std::uint64_t totalDepartures = 0;
-        std::uint64_t maxQ = 0;
-
-        MPI_Bcast(&globalHash, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&totalArrivals, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&totalDepartures, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&maxQ, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
-
-        if (p.verify)
-        {
-            if (!p.hasExpected)
-            {
-                MPI_Finalize();
-                return 2;
-            }
-            if (globalHash != p.expectedHash)
-            {
-                MPI_Finalize();
-                return 3;
-            }
-        }
-
-        MPI_Finalize();
-        return 0;
-    }
-#endif
-
     // Use InProcTransport when size==1 to avoid MPI self-send behavior.
     std::shared_ptr<warpsim::ITransport> transport;
 #if defined(WARPSIM_HAS_MPI)
     if (size > 1)
     {
-        // Rank 0 runs the full simulation locally; no cross-rank traffic.
-        transport = std::make_shared<warpsim::InProcTransport>();
+        transport = std::make_shared<warpsim::MpiTransport>(MPI_COMM_WORLD, /*tag=*/7);
     }
     else
 #endif
@@ -541,7 +505,19 @@ int main(int argc, char **argv)
 #if defined(WARPSIM_HAS_MPI)
     if (size > 1)
     {
-        // Single-rank execution on rank 0; no routing/collectives needed.
+        cfg.lpToRank = [size, driverId](warpsim::LPId lp) -> warpsim::RankId
+        {
+            // Keep the driver on rank 0 so seeding happens exactly once.
+            if (lp == driverId)
+            {
+                return 0;
+            }
+            return static_cast<warpsim::RankId>(lp % static_cast<warpsim::LPId>(size));
+        };
+        cfg.gvtReduceMin = [=](warpsim::TimeStamp local)
+        { return warpsim::mpi_allreduce_min_timestamp(MPI_COMM_WORLD, local); };
+        cfg.anyRankHasWork = [=](bool local)
+        { return warpsim::mpi_allreduce_any_work(MPI_COMM_WORLD, local); };
     }
 #endif
 
@@ -573,8 +549,14 @@ int main(int argc, char **argv)
 
     warpsim::Simulation sim(cfg, transport);
 
-    const auto owns_lp = [&](warpsim::LPId) -> bool
-    { return true; };
+    const auto owns_lp = [&](warpsim::LPId id) -> bool
+    {
+        if (!cfg.lpToRank)
+        {
+            return true;
+        }
+        return cfg.lpToRank(id) == cfg.rank;
+    };
 
     // Create airport LPs with ids [1..airports].
     std::vector<AirportLP *> airports;
@@ -586,13 +568,15 @@ int main(int argc, char **argv)
     for (std::uint32_t i = 0; i < p.airports; ++i)
     {
         const warpsim::LPId id = static_cast<warpsim::LPId>(1 + i);
-        if (owns_lp(id))
+        if (!owns_lp(id))
         {
-            auto lp = std::make_unique<AirportLP>(id, p);
-            airports.push_back(lp.get());
-            sim.add_lp(std::move(lp));
-            ++localAirportCount;
+            continue;
         }
+
+        auto lp = std::make_unique<AirportLP>(id, p);
+        airports.push_back(lp.get());
+        sim.add_lp(std::move(lp));
+        ++localAirportCount;
     }
 
     // Driver seeds initial arrivals.
@@ -654,10 +638,20 @@ int main(int argc, char **argv)
 #if defined(WARPSIM_HAS_MPI)
     if (size > 1)
     {
-        MPI_Bcast(&globalHash, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&totalArrivals, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&totalDepartures, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
-        MPI_Bcast(&maxQ, 1, MPI_UINT64_T, 0, MPI_COMM_WORLD);
+        // XOR hash combines order-independently across ranks.
+        std::uint64_t hashOut = 0;
+        MPI_Allreduce(&globalHash, &hashOut, 1, MPI_UINT64_T, MPI_BXOR, MPI_COMM_WORLD);
+        globalHash = hashOut;
+
+        std::uint64_t arrOut = 0;
+        std::uint64_t depOut = 0;
+        std::uint64_t maxQOut = 0;
+        MPI_Allreduce(&totalArrivals, &arrOut, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(&totalDepartures, &depOut, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+        MPI_Allreduce(&maxQ, &maxQOut, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+        totalArrivals = arrOut;
+        totalDepartures = depOut;
+        maxQ = maxQOut;
     }
 #endif
 

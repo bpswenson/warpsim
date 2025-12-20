@@ -49,9 +49,21 @@ if(WARPSIM_ENABLE_MPI_TESTS)
 		phold_mpi.cpp
 	)
 	target_link_libraries(warpdes_phold_mpi PRIVATE warpdes MPI::MPI_CXX)
+	target_compile_definitions(warpdes_phold_mpi PRIVATE WARPSIM_HAS_MPI=1)
 	add_test(
 		NAME warpdes.mpi_phold_smoke
 		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_phold_mpi> ${MPIEXEC_POSTFLAGS} --lps 64 --init 1 --end 200 --remote 0.9 --lookahead 5 --seed 1
+	)
+
+	# PHOLD determinism across ranks (committed-output hash verified inside the binary).
+	add_test(
+		NAME warpdes.mpi_phold_3ranks
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_phold_mpi> ${MPIEXEC_POSTFLAGS} --lps 1024 --init 1 --end 10000 --remote 0.9 --lookahead 5 --seed 1 --emit-mod 16 --verify --expected-hash 339321921475465244
+	)
+
+	add_test(
+		NAME warpdes.mpi_phold_20ranks
+		COMMAND ${MPIEXEC_EXECUTABLE} --oversubscribe ${MPIEXEC_NUMPROC_FLAG} 20 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_phold_mpi> ${MPIEXEC_POSTFLAGS} --lps 1024 --init 1 --end 10000 --remote 0.9 --lookahead 5 --seed 1 --emit-mod 16 --verify --expected-hash 339321921475465244
 	)
 
 	# Fujimoto airport example determinism across ranks.
