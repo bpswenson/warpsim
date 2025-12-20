@@ -52,6 +52,36 @@ add_executable(warpdes_committed_output_test
 target_link_libraries(warpdes_committed_output_test PRIVATE warpdes)
 add_test(NAME warpdes.committed_output COMMAND warpdes_committed_output_test)
 
+add_executable(warpdes_rollback_snapshot_oldest_anti_test
+	rollback_snapshot_oldest_anti_test.cpp
+)
+target_link_libraries(warpdes_rollback_snapshot_oldest_anti_test PRIVATE warpdes)
+add_test(NAME warpdes.rollback_snapshot_oldest_anti COMMAND warpdes_rollback_snapshot_oldest_anti_test)
+
+add_executable(warpdes_timestamp_sequence_autofill_test
+	timestamp_sequence_autofill_test.cpp
+)
+target_link_libraries(warpdes_timestamp_sequence_autofill_test PRIVATE warpdes)
+add_test(NAME warpdes.timestamp_sequence_autofill COMMAND warpdes_timestamp_sequence_autofill_test)
+
+add_executable(warpdes_sequence_restored_on_rollback_test
+	sequence_restored_on_rollback_test.cpp
+)
+target_link_libraries(warpdes_sequence_restored_on_rollback_test PRIVATE warpdes)
+add_test(NAME warpdes.sequence_restored_on_rollback COMMAND warpdes_sequence_restored_on_rollback_test)
+
+add_executable(warpdes_anti_tombstone_survives_rollback_test
+	anti_tombstone_survives_rollback_test.cpp
+)
+target_link_libraries(warpdes_anti_tombstone_survives_rollback_test PRIVATE warpdes)
+add_test(NAME warpdes.anti_tombstone_survives_rollback COMMAND warpdes_anti_tombstone_survives_rollback_test)
+
+add_executable(warpdes_sent_log_rollback_emits_anti_test
+	sent_log_rollback_emits_anti_test.cpp
+)
+target_link_libraries(warpdes_sent_log_rollback_emits_anti_test PRIVATE warpdes)
+add_test(NAME warpdes.sent_log_rollback_emits_anti COMMAND warpdes_sent_log_rollback_emits_anti_test)
+
 if(WARPSIM_ENABLE_MPI_TESTS)
 	add_executable(warpdes_mpi_smoke_test
 		mpi_smoke_test.cpp
@@ -87,5 +117,32 @@ if(WARPSIM_ENABLE_MPI_TESTS)
 	add_test(
 		NAME warpdes.mpi_fossil_collection
 		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_fossil_collection_test> ${MPIEXEC_POSTFLAGS}
+	)
+
+	add_executable(warpdes_mpi_ack_inflight_exactly_once_test
+		mpi_ack_inflight_exactly_once_test.cpp
+	)
+	target_link_libraries(warpdes_mpi_ack_inflight_exactly_once_test PRIVATE warpdes MPI::MPI_CXX)
+	add_test(
+		NAME warpdes.mpi_ack_inflight_exactly_once
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_ack_inflight_exactly_once_test> ${MPIEXEC_POSTFLAGS}
+	)
+
+	add_executable(warpdes_mpi_colored_gvt_committed_flush_test
+		mpi_colored_gvt_committed_flush_test.cpp
+	)
+	target_link_libraries(warpdes_mpi_colored_gvt_committed_flush_test PRIVATE warpdes MPI::MPI_CXX)
+	add_test(
+		NAME warpdes.mpi_colored_gvt_committed_flush
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_colored_gvt_committed_flush_test> ${MPIEXEC_POSTFLAGS}
+	)
+
+	add_executable(warpdes_mpi_receiver_rollback_anti_cancels_committed_test
+		mpi_receiver_rollback_anti_cancels_committed_test.cpp
+	)
+	target_link_libraries(warpdes_mpi_receiver_rollback_anti_cancels_committed_test PRIVATE warpdes MPI::MPI_CXX)
+	add_test(
+		NAME warpdes.mpi_receiver_rollback_anti_cancels_committed
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_receiver_rollback_anti_cancels_committed_test> ${MPIEXEC_POSTFLAGS}
 	)
 endif()

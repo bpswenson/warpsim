@@ -90,7 +90,8 @@ int main()
     // Enqueue an event at t=50 that requests a committed side effect.
     {
         warpsim::Event e;
-        e.ts = warpsim::TimeStamp{50, 0};
+        // Use an explicit non-zero sequence: Simulation::send auto-assigns sequence when 0.
+        e.ts = warpsim::TimeStamp{50, 1};
         e.src = 1;
         e.dst = 1;
         e.payload.kind = KindEmit;
@@ -106,7 +107,7 @@ int main()
     // Advance time/GVT by sending and processing a later event at t=60.
     {
         warpsim::Event e;
-        e.ts = warpsim::TimeStamp{60, 0};
+        e.ts = warpsim::TimeStamp{60, 2};
         e.src = 1;
         e.dst = 1;
         e.payload.kind = KindNoop;
@@ -117,7 +118,7 @@ int main()
     assert(progressed);
 
     assert(outputs.size() == 1);
-    const warpsim::TimeStamp expectedTs{50, 0};
+    const warpsim::TimeStamp expectedTs{50, 1};
     assert(outputs[0].ts == expectedTs);
     assert(outputs[0].lp == 1);
     assert(outputs[0].payload.kind == KindCommitted);
