@@ -109,11 +109,12 @@ Start 20: warpdes.mpi_airport_fujimoto_20ranks
 ## Docs
 
 Project docs live in `docs/`:
-- `docs/modeler_intro.md`
-- `docs/modeling_contract.md`
-- `docs/committed_output.md`
-- `docs/random.md`
-- `docs/aoi.md`
+- [docs/modeler_intro.md](docs/modeler_intro.md)
+- [docs/modeling_contract.md](docs/modeling_contract.md)
+- [docs/integrating_with_cmake.md](docs/integrating_with_cmake.md)
+- [docs/committed_output.md](docs/committed_output.md)
+- [docs/random.md](docs/random.md)
+- [docs/aoi.md](docs/aoi.md)
 
 ## Examples
 
