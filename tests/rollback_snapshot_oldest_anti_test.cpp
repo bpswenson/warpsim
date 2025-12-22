@@ -1,3 +1,10 @@
+/*
+Purpose: Validates snapshot restore when rolling back to the oldest relevant point.
+
+What this tests: Under rollback/anti pressure, the simulator can restore state from the
+correct snapshot and produce the right committed outputs after re-execution.
+*/
+
 #include "simulation.hpp"
 #include "transport.hpp"
 

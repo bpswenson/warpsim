@@ -1,3 +1,10 @@
+/*
+Purpose: Ensures receiver rollback cancels committed side effects before they flush.
+
+What this tests: In an MPI run, if a receiver rolls back and sends an anti-message for a
+work event, any committed output produced by that work is cancelled and does not flush.
+*/
+
 #include "mpi_collectives.hpp"
 #include "mpi_transport.hpp"
 #include "simulation.hpp"
@@ -16,6 +23,9 @@ namespace
     constexpr std::uint32_t KindAck = 4;
     constexpr std::uint32_t KindDummy = 5;
     constexpr std::uint32_t KindCommitted = 200;
+
+    constexpr std::uint32_t KindHeartbeat = 999;
+    constexpr warpsim::EntityId kHeartbeatStateBase = 0xBEEFB001ULL;
 
     constexpr warpsim::EventUid WorkUid = 0x55555555ULL;
 
@@ -138,6 +148,53 @@ namespace
         warpsim::LPId m_id = 0;
         int m_rank = 0;
     };
+
+    // A tiny per-rank LP used only to prove that each rank runs at least one stateful event.
+    class HeartbeatLP final : public warpsim::ILogicalProcess
+    {
+    public:
+        explicit HeartbeatLP(warpsim::LPId id) : m_id(id) {}
+
+        warpsim::LPId id() const noexcept override { return m_id; }
+
+        void on_start(warpsim::IEventSink &sink) override
+        {
+            warpsim::Event hb;
+            hb.ts = warpsim::TimeStamp{1, 0};
+            hb.src = m_id;
+            hb.dst = m_id;
+            hb.payload.kind = KindHeartbeat;
+            sink.send(std::move(hb));
+        }
+
+        void on_event(const warpsim::Event &ev, warpsim::IEventContext &ctx) override
+        {
+            if (ev.payload.kind != KindHeartbeat)
+            {
+                return;
+            }
+            ctx.request_write(kHeartbeatStateBase + static_cast<warpsim::EntityId>(m_id));
+            ++m_count;
+        }
+
+        warpsim::ByteBuffer save_state() const override
+        {
+            return warpsim::bytes_from_trivially_copyable(m_count);
+        }
+
+        void load_state(std::span<const std::byte> state) override
+        {
+            if (state.size() != sizeof(m_count))
+            {
+                return;
+            }
+            std::memcpy(&m_count, state.data(), sizeof(m_count));
+        }
+
+    private:
+        warpsim::LPId m_id = 0;
+        std::uint64_t m_count = 0;
+    };
 }
 
 int main(int argc, char **argv)
@@ -184,6 +241,11 @@ int main(int argc, char **argv)
 
     warpsim::Simulation sim(cfg, transport);
 
+    // Add a per-rank heartbeat LP that maps locally via (lp % size).
+    // This keeps the core size=2 layout intact while ensuring size>2 runs are non-gimped.
+    const warpsim::LPId heartbeatLp = static_cast<warpsim::LPId>(rank + size * 10);
+    sim.add_lp(std::make_unique<HeartbeatLP>(heartbeatLp));
+
     // LP layout for size=2 (lp%2): rank0 owns LP0 and LP2, rank1 owns LP1.
     if (rank == 0)
     {
@@ -197,10 +259,17 @@ int main(int argc, char **argv)
 
     sim.run();
 
+    const auto st = sim.stats();
+    const std::uint64_t processedLocal = st.totalProcessed;
+    std::uint64_t processedMin = 0;
+    MPI_Allreduce(&processedLocal, &processedMin, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
+
     std::uint64_t committedCountGlobal = 0;
     MPI_Allreduce(&committedCountLocal, &committedCountGlobal, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
 
-    int okLocal = (committedCountGlobal == 0) ? 1 : 0;
+    int okLocal = 1;
+    okLocal &= (committedCountGlobal == 0) ? 1 : 0;
+    okLocal &= (processedMin > 0) ? 1 : 0;
     int okGlobal = 0;
     MPI_Allreduce(&okLocal, &okGlobal, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
 

@@ -1,3 +1,10 @@
+/*
+Purpose: Unit tests for the StateHistory snapshot store.
+
+What this tests: Queries like "latest at or before" return the correct snapshot across
+times and sequences, including edge cases (empty, before-first, max-sequence).
+*/
+
 #include "state_store.hpp"
 
 #include <cassert>

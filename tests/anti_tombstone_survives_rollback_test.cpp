@@ -1,3 +1,10 @@
+/*
+Purpose: Ensures cancellations are not lost across rollback.
+
+What this tests: Once an event has been cancelled (via anti), later rollbacks must not
+"resurrect" it; cancelled work stays cancelled and committed side effects remain consistent.
+*/
+
 #include "simulation.hpp"
 #include "transport.hpp"
 

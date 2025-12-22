@@ -1,3 +1,10 @@
+/*
+Purpose: Ensures multi-rank termination works with GVT.
+
+What this tests: With cross-rank ping-pong traffic and local progress on each rank, the
+collectives-driven termination condition eventually detects quiescence and the run exits.
+*/
+
 #include "mpi_transport.hpp"
 #include "mpi_collectives.hpp"
 #include "simulation.hpp"
@@ -12,6 +19,8 @@
 namespace
 {
     static constexpr std::uint32_t kPingKind = 1;
+
+    static constexpr warpsim::EntityId kStateBase = 0x67BEEF00ULL;
 
     struct PingArgs
     {
@@ -58,6 +67,8 @@ namespace
 
             PingArgs args{};
             std::memcpy(&args, ev.payload.bytes.data(), sizeof(PingArgs));
+
+            ctx.request_write(kStateBase + static_cast<warpsim::EntityId>(m_id));
             ++m_processed;
 
             if (args.remaining == 0)
@@ -143,6 +154,11 @@ int main(int argc, char **argv)
 
     const auto stats = sim.stats();
 
+    // Anti-gimp: every rank should process at least one event.
+    const std::uint64_t processedLocal = stats.totalProcessed;
+    std::uint64_t processedMin = 0;
+    MPI_Allreduce(&processedLocal, &processedMin, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
+
     // Termination correctness signal: both ranks should have received at least one event.
     const bool sawRemote = stats.receivedEvents > 0;
 
@@ -154,7 +170,7 @@ int main(int argc, char **argv)
     // Also require a non-trivial advance to avoid passing with all-zeros.
     const bool gvtAdvanced = stats.gvt.time > 0;
 
-    int localOk = (sawRemote && gvtMatchesGlobal && gvtAdvanced) ? 1 : 0;
+    int localOk = (sawRemote && gvtMatchesGlobal && gvtAdvanced && processedMin > 0) ? 1 : 0;
     int globalOk = 0;
     MPI_Allreduce(&localOk, &globalOk, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
 

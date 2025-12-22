@@ -1,3 +1,10 @@
+/*
+Purpose: End-to-end test of optimistic entity migration using a directory LP.
+
+What this tests: Owner updates and installs are routed through the directory, events are
+delivered to the correct owner-at-time, and the final owner/state are consistent.
+*/
+
 #include "directory_lp.hpp"
 #include "optimistic_migration.hpp"
 #include "simulation.hpp"

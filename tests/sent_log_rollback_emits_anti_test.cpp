@@ -1,3 +1,10 @@
+/*
+Purpose: Ensures rollback emits anti-messages for previously sent events.
+
+What this tests: The sender's sent-log is complete enough to generate matching anti
+messages during rollback, so downstream LPs correctly cancel and do not commit side effects.
+*/
+
 #include "simulation.hpp"
 #include "transport.hpp"
 

@@ -6,6 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
+#include <limits>
+#include <optional>
 #include <stdexcept>
 
 namespace warpsim::optimistic_migration
@@ -15,6 +18,24 @@ namespace warpsim::optimistic_migration
     inline constexpr std::uint32_t DefaultUpdateOwnerKind = 42001;
     inline constexpr std::uint32_t DefaultInstallKind = 42002;
     inline constexpr std::uint32_t DefaultFossilCollectKind = 42003;
+    inline constexpr std::uint32_t DefaultMigrationLogKind = 42004;
+
+    using MigrationLogRecord = DirectoryMigrationLog;
+
+    inline MigrationLogRecord decode_migration_log_payload(const Payload &p)
+    {
+        if (p.kind != DefaultMigrationLogKind)
+        {
+            throw std::runtime_error("optimistic_migration: wrong migration-log kind");
+        }
+        if (p.bytes.size() != sizeof(MigrationLogRecord))
+        {
+            throw std::runtime_error("optimistic_migration: bad migration-log payload");
+        }
+        MigrationLogRecord r{};
+        std::memcpy(&r, p.bytes.data(), sizeof(MigrationLogRecord));
+        return r;
+    }
 
     struct UpdateOwnerHeader
     {
@@ -50,6 +71,104 @@ namespace warpsim::optimistic_migration
             std::memcpy(p.bytes.data() + sizeof(UpdateOwnerHeader), state.data(), state.size());
         }
         return p;
+    }
+
+    // Same wire format as make_update_owner_payload, but allows callers to use a custom event kind.
+    // This is useful when models want to reserve their own kind ranges.
+    inline Payload make_update_owner_payload(std::uint32_t kind, EntityId entity, LPId newOwner, std::span<const std::byte> state)
+    {
+        Payload p = make_update_owner_payload(entity, newOwner, state);
+        p.kind = kind;
+        return p;
+    }
+
+    // --- Extensible migration criteria (model-defined) ------------------------
+    //
+    // WarpSim deliberately does not bake a single "correct" migration heuristic into the kernel.
+    // Different models want different criteria (load, locality, contention, AOI overlap, etc.).
+    //
+    // The model can implement its own policy and use the helpers below to emit
+    // directory update-owner events once it has decided to migrate an entity.
+
+    struct MigrationInputs
+    {
+        EntityId entity = 0;
+        LPId currentOwner = 0;
+
+        // Context for the decision.
+        LPId self = 0;
+        TimeStamp now{0, 0};
+
+        // Optional model-provided signals.
+        std::uint64_t localWork = 0;
+        std::uint64_t remoteWork = 0;
+    };
+
+    using DecideNewOwnerFn = std::function<std::optional<LPId>(const MigrationInputs &)>;
+
+    // Emit a directory update-owner event (LP-addressed) that migrates `entity` to `newOwner`.
+    // The caller is responsible for capturing the entity's state bytes in a model-defined way.
+    inline void send_update_owner(IEventSink &sink,
+                                  TimeStamp ts,
+                                  LPId src,
+                                  LPId directoryLp,
+                                  std::uint32_t updateOwnerKind,
+                                  EntityId entity,
+                                  LPId newOwner,
+                                  std::span<const std::byte> state,
+                                  EventUid uid = 0)
+    {
+        Event ev;
+        ev.ts = ts;
+        ev.src = src;
+        ev.dst = directoryLp;
+        ev.target = entity;
+        ev.uid = uid;
+        ev.payload = make_update_owner_payload(updateOwnerKind, entity, newOwner, state);
+        sink.send(std::move(ev));
+    }
+
+    // Convenience wrapper: ask a policy to choose a new owner, and if it chooses one,
+    // emit the directory update-owner event.
+    //
+    // Returns true if a migration update was sent.
+    inline bool maybe_migrate(IEventSink &sink,
+                              TimeStamp effectiveTs,
+                              LPId src,
+                              LPId directoryLp,
+                              std::uint32_t updateOwnerKind,
+                              std::span<const std::byte> state,
+                              const MigrationInputs &in,
+                              const DecideNewOwnerFn &decide,
+                              EventUid uid = 0)
+    {
+        if (!decide)
+        {
+            return false;
+        }
+
+        const auto choice = decide(in);
+        if (!choice.has_value())
+        {
+            return false;
+        }
+
+        const LPId newOwner = *choice;
+        if (newOwner == 0 || newOwner == in.currentOwner)
+        {
+            return false;
+        }
+
+        send_update_owner(sink,
+                          effectiveTs,
+                          src,
+                          directoryLp,
+                          updateOwnerKind,
+                          in.entity,
+                          newOwner,
+                          state,
+                          uid);
+        return true;
     }
 
     inline DirectoryUpdate decode_update_owner_as_directory_update(const Event &ev)
@@ -148,6 +267,7 @@ namespace warpsim::optimistic_migration
         cfg.updateOwnerKind = DefaultUpdateOwnerKind;
         cfg.decodeUpdate = [](const Event &ev) -> DirectoryUpdate
         { return decode_update_owner_as_directory_update(ev); };
+        cfg.migrationLogKind = DefaultMigrationLogKind;
         cfg.fossilCollectKind = DefaultFossilCollectKind;
         cfg.decodeFossilCollect = [](const Event &ev) -> TimeStamp
         { return decode_fossil_collect_payload(ev); };

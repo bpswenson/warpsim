@@ -1,3 +1,10 @@
+/*
+Purpose: Validates that entity migration is safe with respect to GVT/commit.
+
+What this tests: After a migration is committed, messages sent to the old owner are
+re-routed to the new owner, and entity state/use events still behave correctly.
+*/
+
 #include "migration.hpp"
 #include "simulation.hpp"
 #include "transport.hpp"

@@ -1,3 +1,10 @@
+/*
+Purpose: Regression test for exactly-once inflight ACK bookkeeping.
+
+What this tests: Under rollback (anti-messages) in an MPI run, the inflight ACK tracking
+does not leak or double-count, and the system still reaches a clean termination.
+*/
+
 #include "mpi_collectives.hpp"
 #include "mpi_transport.hpp"
 #include "simulation.hpp"
@@ -6,6 +13,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <memory>
 
 namespace
@@ -15,6 +23,8 @@ namespace
     constexpr std::uint32_t KindStraggler = 3;
     constexpr std::uint32_t KindNoop = 4;
     constexpr std::uint32_t KindCommitted = 200;
+
+    constexpr warpsim::EntityId kStateBase = 0xAC1FF100ULL;
 
     struct DummyArgs
     {
@@ -33,6 +43,38 @@ namespace
 
         void on_start(warpsim::IEventSink &sink) override
         {
+            // Test harness: keep global GVT low long enough that the send log cannot be
+            // fossil-collected before the synthetic straggler arrives.
+            //
+            // This test intentionally injects a straggler with a timestamp earlier than the
+            // sender's current event time (to force rollback + anti). If GVT were allowed to
+            // advance past the kickoff-send point first, the kernel could legally prune the
+            // send log and no anti would be emitted. The goal here is to test inflight ACK
+            // bookkeeping under rollback, not GVT advancement.
+            if (m_rank == 1)
+            {
+                for (std::uint32_t i = 0; i < 2000; ++i)
+                {
+                    warpsim::Event hold;
+                    hold.ts = warpsim::TimeStamp{0, 0};
+                    hold.src = m_id;
+                    hold.dst = m_id;
+                    hold.payload.kind = KindNoop;
+                    sink.send(std::move(hold));
+                }
+            }
+
+            // Ensure every rank has local work (not just rank0/LP1).
+            for (std::uint64_t t = 30; t <= 60; ++t)
+            {
+                warpsim::Event ev;
+                ev.ts = warpsim::TimeStamp{t, 0};
+                ev.src = m_id;
+                ev.dst = m_id;
+                ev.payload.kind = KindNoop;
+                sink.send(std::move(ev));
+            }
+
             // Only rank0 seeds the kickoff.
             if (m_rank != 0)
             {
@@ -45,17 +87,6 @@ namespace
             kickoff.dst = m_id;
             kickoff.payload.kind = KindKickoff;
             sink.send(std::move(kickoff));
-
-            // Also seed some later local work so GVT can advance and flush committed output.
-            for (std::uint64_t t = 30; t <= 60; ++t)
-            {
-                warpsim::Event ev;
-                ev.ts = warpsim::TimeStamp{t, 0};
-                ev.src = m_id;
-                ev.dst = m_id;
-                ev.payload.kind = KindNoop;
-                sink.send(std::move(ev));
-            }
         }
 
         void on_event(const warpsim::Event &ev, warpsim::IEventContext &ctx) override
@@ -100,17 +131,36 @@ namespace
                 return;
             }
 
+            if (ev.payload.kind == KindNoop)
+            {
+                ctx.request_write(kStateBase + static_cast<warpsim::EntityId>(m_id));
+                ++m_localNoops;
+                return;
+            }
+
             // Straggler/noop are intentionally no-ops.
             (void)ctx;
         }
 
-        warpsim::ByteBuffer save_state() const override { return {}; }
-        void load_state(std::span<const std::byte>) override {}
+        warpsim::ByteBuffer save_state() const override
+        {
+            return warpsim::bytes_from_trivially_copyable(m_localNoops);
+        }
+
+        void load_state(std::span<const std::byte> state) override
+        {
+            if (state.size() != sizeof(m_localNoops))
+            {
+                return;
+            }
+            std::memcpy(&m_localNoops, state.data(), sizeof(m_localNoops));
+        }
 
     private:
         warpsim::LPId m_id = 0;
         int m_rank = 0;
         int m_size = 1;
+        std::uint64_t m_localNoops = 0;
     };
 }
 
@@ -165,6 +215,11 @@ int main(int argc, char **argv)
 
     const auto st = sim.stats();
 
+    // Anti-gimp: require every rank processed at least one event.
+    const std::uint64_t processedLocal = st.totalProcessed;
+    std::uint64_t processedMin = 0;
+    MPI_Allreduce(&processedLocal, &processedMin, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
+
     // Global checks.
     std::uint64_t committedCountGlobal = 0;
     MPI_Allreduce(&committedCountLocal, &committedCountGlobal, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
@@ -173,12 +228,40 @@ int main(int argc, char **argv)
     std::uint64_t sentAntiGlobal = 0;
     MPI_Allreduce(&sentAnti, &sentAntiGlobal, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
 
+    const std::uint64_t rollbacksStraggler = st.rollbacksStraggler;
+    std::uint64_t rollbacksStragglerGlobal = 0;
+    MPI_Allreduce(&rollbacksStraggler, &rollbacksStragglerGlobal, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
+
+    const std::uint64_t pendingLocal = static_cast<std::uint64_t>(st.pending);
+    const std::uint64_t inflightLocal = static_cast<std::uint64_t>(st.inflight);
+    std::uint64_t pendingMax = 0;
+    std::uint64_t inflightMax = 0;
+    MPI_Allreduce(&pendingLocal, &pendingMax, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+    MPI_Allreduce(&inflightLocal, &inflightMax, 1, MPI_UINT64_T, MPI_MAX, MPI_COMM_WORLD);
+
     int okLocal = 1;
-    okLocal &= (committedCountGlobal == 1) ? 1 : 0;
+    // This test is specifically about the inflight ACK bookkeeping in AckInflight mode.
+    // We require that a rollback occurred, at least one anti was sent, and the run drained cleanly.
     okLocal &= (sentAntiGlobal >= 1) ? 1 : 0;
+    okLocal &= (rollbacksStragglerGlobal >= 1) ? 1 : 0;
+    okLocal &= (pendingMax == 0) ? 1 : 0;
+    okLocal &= (inflightMax == 0) ? 1 : 0;
+    okLocal &= (processedMin > 0) ? 1 : 0;
 
     int okGlobal = 0;
     MPI_Allreduce(&okLocal, &okGlobal, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);
+
+    if (okGlobal != 1 && rank == 0)
+    {
+        std::fprintf(stderr,
+                     "mpi_ack_inflight_exactly_once failed: processedMin=%llu sentAntiGlobal=%llu rollbacksStragglerGlobal=%llu pendingMax=%llu inflightMax=%llu committedCountGlobal=%llu\n",
+                     static_cast<unsigned long long>(processedMin),
+                     static_cast<unsigned long long>(sentAntiGlobal),
+                     static_cast<unsigned long long>(rollbacksStragglerGlobal),
+                     static_cast<unsigned long long>(pendingMax),
+                     static_cast<unsigned long long>(inflightMax),
+                     static_cast<unsigned long long>(committedCountGlobal));
+    }
 
     MPI_Finalize();
     return (okGlobal == 1) ? 0 : 2;

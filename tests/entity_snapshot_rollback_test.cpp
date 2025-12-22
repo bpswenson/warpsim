@@ -1,3 +1,10 @@
+/*
+Purpose: Checks that entity-level snapshot/restore is correct during rollback.
+
+What this tests: With intentionally reordered message delivery (stragglers), the engine
+must roll back and restore per-entity state (multiple entities) to the right values.
+*/
+
 #include "event_dispatcher.hpp"
 #include "simulation.hpp"
 #include "world.hpp"

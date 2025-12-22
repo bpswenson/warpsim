@@ -1,3 +1,10 @@
+/*
+Purpose: Validates basic MPI transport send/receive.
+
+What this tests: A point-to-point message sent by rank 0 is received intact by rank 1
+via MpiTransport (correct kind/src/dst and payload bytes).
+*/
+
 #include "mpi_transport.hpp"
 
 #include <mpi.h>

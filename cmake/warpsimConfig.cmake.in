@@ -1,0 +1,6 @@
+@PACKAGE_INIT@
+
+include("${CMAKE_CURRENT_LIST_DIR}/warpsimTargets.cmake")
+
+# Convenience for manual include usage (prefer linking warpsim::warpsim).
+set(WARPSIM_INCLUDE_DIRS "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_INCLUDEDIR@/warpsim")

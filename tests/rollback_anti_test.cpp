@@ -1,3 +1,10 @@
+/*
+Purpose: Validates core Time Warp behavior under rollback.
+
+What this tests: When a straggler forces an LP to roll back, previously-sent events from
+the rolled-back timeline are cancelled via anti-messages, and state is restored correctly.
+*/
+
 #include "event_dispatcher.hpp"
 #include "simulation.hpp"
 #include "world.hpp"

@@ -12,6 +12,12 @@ Core features:
 
 This repo builds a library (`warpdes`) plus unit tests and examples under `tests/` and `examples/`.
 
+## Project origin / disclaimer
+
+This project started as a paired-programming experiment with ChatGPT (GPT-5.2) over winter break 2025 to evaluate code generation capabilities.
+
+We are doing our best to ensure everything works as intended, but please treat the codebase accordingly: review changes carefully, run the tests for your environment, and validate correctness for your model/use case.
+
 ## Build
 
 ### Non-MPI build

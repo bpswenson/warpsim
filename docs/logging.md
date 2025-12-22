@@ -38,6 +38,13 @@ This is intended for debugging kernel behavior (rollbacks, anti-cancels, etc.).
 Note: direct logging from inside an LP’s `on_event()` can be replayed during rollback.
 For “print this once” style output, use committed output.
 
+## Migration visibility
+
+To verify that migrations are happening when your policy says they should:
+
+- Prefer the rollback-safe committed-output migration records documented in [migration.md](migration.md).
+- If you want to confirm that targeted events are being routed via a directory LP, set `SimulationConfig::logLevel = LogLevel::Trace` and watch for "route targeted event" log lines.
+
 ## When to use an external library
 
 If you want structured logging, async sinks, file rotation, or formatting, `spdlog` is a good next step.

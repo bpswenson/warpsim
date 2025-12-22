@@ -1,3 +1,5 @@
+add_compile_definitions(WARPSIM_ENABLE_INVARIANT_CHECKS_DEFAULT=1)
+
 add_executable(warpdes_rollback_anti_test
 	rollback_anti_test.cpp
 )
@@ -52,6 +54,12 @@ add_executable(warpdes_directory_lp_unit_test
 target_link_libraries(warpdes_directory_lp_unit_test PRIVATE warpdes)
 add_test(NAME warpdes.directory_lp_unit COMMAND warpdes_directory_lp_unit_test)
 
+add_executable(warpdes_committed_event_trace_determinism_test
+	committed_event_trace_determinism_test.cpp
+)
+target_link_libraries(warpdes_committed_event_trace_determinism_test PRIVATE warpdes)
+add_test(NAME warpdes.committed_event_trace_determinism COMMAND warpdes_committed_event_trace_determinism_test)
+
 add_executable(warpdes_uid_determinism_test
 	uid_determinism_test.cpp
 )
@@ -69,6 +77,12 @@ add_executable(warpdes_committed_output_test
 )
 target_link_libraries(warpdes_committed_output_test PRIVATE warpdes)
 add_test(NAME warpdes.committed_output COMMAND warpdes_committed_output_test)
+
+add_executable(warpdes_randomized_rollback_stress_determinism_test
+	randomized_rollback_stress_determinism_test.cpp
+)
+target_link_libraries(warpdes_randomized_rollback_stress_determinism_test PRIVATE warpdes)
+add_test(NAME warpdes.randomized_rollback_stress_determinism COMMAND warpdes_randomized_rollback_stress_determinism_test)
 
 add_executable(warpdes_rollback_snapshot_oldest_anti_test
 	rollback_snapshot_oldest_anti_test.cpp
@@ -118,6 +132,35 @@ add_executable(warpdes_state_history_trim_test
 target_link_libraries(warpdes_state_history_trim_test PRIVATE warpdes)
 add_test(NAME warpdes.state_history_trim COMMAND warpdes_state_history_trim_test)
 
+add_executable(warpdes_wire_truncation_decode_test
+	wire_truncation_decode_test.cpp
+)
+target_link_libraries(warpdes_wire_truncation_decode_test PRIVATE warpdes)
+add_test(NAME warpdes.wire_truncation_decode COMMAND warpdes_wire_truncation_decode_test)
+
+add_executable(warpdes_modeling_helpers_test
+	modeling_helpers_test.cpp
+)
+target_link_libraries(warpdes_modeling_helpers_test PRIVATE warpdes)
+add_test(NAME warpdes.modeling_helpers COMMAND warpdes_modeling_helpers_test)
+
+add_executable(warpdes_targeted_event_requires_routing_test
+	targeted_event_requires_routing_test.cpp
+)
+target_link_libraries(warpdes_targeted_event_requires_routing_test PRIVATE warpdes)
+add_test(NAME warpdes.targeted_event_requires_routing COMMAND warpdes_targeted_event_requires_routing_test)
+
+# Verifies that `cmake --install` produces a usable `find_package(warpsim CONFIG)` package.
+set(_warpsim_install_prefix "${CMAKE_BINARY_DIR}/_install_test")
+add_test(
+	NAME warpdes.cmake_find_package_install
+	COMMAND ${CMAKE_COMMAND}
+		-Dwarpsim_BUILD_DIR=${CMAKE_BINARY_DIR}
+		-Dwarpsim_SOURCE_DIR=${CMAKE_SOURCE_DIR}
+		-Dwarpsim_INSTALL_PREFIX=${_warpsim_install_prefix}
+		-P ${CMAKE_SOURCE_DIR}/tests/cmake_integration/find_package_install_test.cmake
+)
+
 if(WARPSIM_ENABLE_MPI_TESTS)
 	add_executable(warpdes_mpi_smoke_test
 		mpi_smoke_test.cpp
@@ -136,6 +179,14 @@ if(WARPSIM_ENABLE_MPI_TESTS)
 		NAME warpdes.mpi_transport_delivery
 		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_transport_delivery_test> ${MPIEXEC_POSTFLAGS}
 	)
+
+	 add_executable(warpdes_mpi_determinism_digest_invariance_test
+			mpi_determinism_digest_invariance_test.cpp
+		)
+	 target_link_libraries(warpdes_mpi_determinism_digest_invariance_test PRIVATE warpdes MPI::MPI_CXX)
+	 add_test(NAME warpdes.mpi_determinism_digest_invariance_2ranks COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_determinism_digest_invariance_test> ${MPIEXEC_POSTFLAGS})
+	 add_test(NAME warpdes.mpi_determinism_digest_invariance_3ranks COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_determinism_digest_invariance_test> ${MPIEXEC_POSTFLAGS})
+	 add_test(NAME warpdes.mpi_determinism_digest_invariance_5ranks COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 5 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_determinism_digest_invariance_test> ${MPIEXEC_POSTFLAGS})
 
 	add_executable(warpdes_mpi_multirank_gvt_termination_test
 		mpi_multirank_gvt_termination_test.cpp
@@ -190,4 +241,21 @@ if(WARPSIM_ENABLE_MPI_TESTS)
 		NAME warpdes.mpi_optimistic_migration_directory
 		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_optimistic_migration_directory_test> ${MPIEXEC_POSTFLAGS}
 	)
+
+	add_executable(warpdes_mpi_entity_migration_policy_test
+		mpi_entity_migration_policy_test.cpp
+	)
+	target_link_libraries(warpdes_mpi_entity_migration_policy_test PRIVATE warpdes MPI::MPI_CXX)
+	add_test(NAME warpdes.mpi_entity_migration_policy_2ranks COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_entity_migration_policy_test> ${MPIEXEC_POSTFLAGS})
+	add_test(NAME warpdes.mpi_entity_migration_policy_3ranks COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_entity_migration_policy_test> ${MPIEXEC_POSTFLAGS})
+	add_test(NAME warpdes.mpi_entity_migration_policy_5ranks COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 5 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_entity_migration_policy_test> ${MPIEXEC_POSTFLAGS})
+
+	add_executable(warpdes_mpi_optimistic_migration_straggler_rollback_test
+		mpi_optimistic_migration_straggler_rollback_test.cpp
+	)
+	target_link_libraries(warpdes_mpi_optimistic_migration_straggler_rollback_test PRIVATE warpdes MPI::MPI_CXX)
+	add_test(NAME warpdes.mpi_optimistic_migration_straggler_rollback_2ranks COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_optimistic_migration_straggler_rollback_test> ${MPIEXEC_POSTFLAGS})
+	add_test(NAME warpdes.mpi_optimistic_migration_straggler_rollback_3ranks COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_optimistic_migration_straggler_rollback_test> ${MPIEXEC_POSTFLAGS})
+	add_test(NAME warpdes.mpi_optimistic_migration_straggler_rollback_5ranks COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 5 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_mpi_optimistic_migration_straggler_rollback_test> ${MPIEXEC_POSTFLAGS})
+
 endif()

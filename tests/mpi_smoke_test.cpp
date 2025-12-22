@@ -1,3 +1,10 @@
+/*
+Purpose: Minimal MPI sanity check.
+
+What this tests: The test harness can start MPI, determine rank/size, and enforce that
+the MPI test suite is running with at least two ranks.
+*/
+
 #include <mpi.h>
 
 #include <cstdio>

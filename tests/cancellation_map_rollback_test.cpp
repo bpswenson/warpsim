@@ -1,3 +1,10 @@
+/*
+Purpose: Exercises cancellation bookkeeping during rollback.
+
+What this tests: If a receiver rolls back and cancels previously processed work, the
+cancellation map/tombstones correctly suppress re-processing and prevent duplicate outputs.
+*/
+
 #include "simulation.hpp"
 #include "transport.hpp"
 

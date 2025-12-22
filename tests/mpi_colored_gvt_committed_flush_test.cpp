@@ -1,3 +1,10 @@
+/*
+Purpose: Validates committed-output flushing under ColoredCounters GVT.
+
+What this tests: In an MPI run with local work on every rank, GVT advances and committed
+side effects are flushed only when safe (past GVT), including for a remote work item.
+*/
+
 #include "mpi_collectives.hpp"
 #include "mpi_transport.hpp"
 #include "simulation.hpp"
@@ -14,6 +21,8 @@ namespace
     constexpr std::uint32_t KindWork = 11;
     constexpr std::uint32_t KindNoop = 12;
     constexpr std::uint32_t KindCommitted = 200;
+
+    constexpr warpsim::EntityId kStateBase = 0xC010E3D0ULL;
 
     class GvtLP final : public warpsim::ILogicalProcess
     {
@@ -49,6 +58,13 @@ namespace
 
         void on_event(const warpsim::Event &ev, warpsim::IEventContext &ctx) override
         {
+            if (ev.payload.kind == KindNoop)
+            {
+                ctx.request_write(kStateBase + static_cast<warpsim::EntityId>(m_id));
+                ++m_noops;
+                return;
+            }
+
             if (ev.payload.kind == KindSeedSend)
             {
                 // Send to LP1 at t=15.
@@ -68,6 +84,8 @@ namespace
                     return;
                 }
 
+                ctx.request_write(kStateBase + static_cast<warpsim::EntityId>(m_id));
+
                 warpsim::Payload out;
                 out.kind = KindCommitted;
                 out.bytes = warpsim::bytes_from_trivially_copyable(static_cast<std::uint64_t>(123));
@@ -78,13 +96,25 @@ namespace
             (void)ctx;
         }
 
-        warpsim::ByteBuffer save_state() const override { return {}; }
-        void load_state(std::span<const std::byte>) override {}
+        warpsim::ByteBuffer save_state() const override
+        {
+            return warpsim::bytes_from_trivially_copyable(m_noops);
+        }
+
+        void load_state(std::span<const std::byte> state) override
+        {
+            if (state.size() != sizeof(m_noops))
+            {
+                return;
+            }
+            std::memcpy(&m_noops, state.data(), sizeof(m_noops));
+        }
 
     private:
         warpsim::LPId m_id = 0;
         int m_rank = 0;
         int m_size = 1;
+        std::uint64_t m_noops = 0;
     };
 }
 
@@ -143,6 +173,11 @@ int main(int argc, char **argv)
 
     const auto st = sim.stats();
 
+    // Anti-gimp: every rank should process at least one event.
+    const std::uint64_t processedLocal = st.totalProcessed;
+    std::uint64_t processedMin = 0;
+    MPI_Allreduce(&processedLocal, &processedMin, 1, MPI_UINT64_T, MPI_MIN, MPI_COMM_WORLD);
+
     std::uint64_t committedCountGlobal = 0;
     MPI_Allreduce(&committedCountLocal, &committedCountGlobal, 1, MPI_UINT64_T, MPI_SUM, MPI_COMM_WORLD);
 
@@ -154,6 +189,7 @@ int main(int argc, char **argv)
     int okLocal = 1;
     okLocal &= (committedCountGlobal == 1) ? 1 : 0;
     okLocal &= (gvtMin >= 80) ? 1 : 0;
+    okLocal &= (processedMin > 0) ? 1 : 0;
 
     int okGlobal = 0;
     MPI_Allreduce(&okLocal, &okGlobal, 1, MPI_INT, MPI_LAND, MPI_COMM_WORLD);

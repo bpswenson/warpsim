@@ -1,3 +1,10 @@
+/*
+Purpose: Verifies that an anti-message can arrive before its matching event.
+
+What this tests: The kernel must record the cancellation so the later event is dropped,
+and the target LP never executes the cancelled work.
+*/
+
 #include "simulation.hpp"
 
 #include <cassert>

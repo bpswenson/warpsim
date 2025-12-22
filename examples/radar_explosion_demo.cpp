@@ -276,7 +276,7 @@ namespace
 
                 // Deterministic jitter to demonstrate rollback-safe RNG.
                 // Keyed off (seed, LPId, event uid) so it doesn't depend on rank or execution order.
-                const double u = warpsim::rng_unit_double(m_seed, m_id, /*stream=*/1, ev.uid, /*draw=*/0);
+                const double u = warpsim::rng_unit_double(m_seed, m_id, /*stream=*/1, ev.src, ev.uid, /*draw=*/0);
                 const double jitter = (u * 2.0 - 1.0) * 10.0; // [-10,+10]
                 q.origin = warpsim::Vec3{200.0 + jitter, 0, 0};
                 q.radius = 600.0;

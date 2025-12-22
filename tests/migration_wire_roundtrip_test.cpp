@@ -1,3 +1,10 @@
+/*
+Purpose: Checks serialization for migration messages.
+
+What this tests: A Migration struct can be encoded to bytes and decoded back with the
+same entity, owner, timestamp, and state payload.
+*/
+
 #include "migration.hpp"
 
 #include <cassert>

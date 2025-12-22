@@ -7,6 +7,15 @@ if(WARPSIM_ENABLE_EXAMPLE_SMOKE_TESTS)
 	add_test(NAME warpdes.example_demo COMMAND $<TARGET_FILE:warpdes_demo>)
 endif()
 
+add_executable(warpdes_entity_migration_demo
+	entity_migration_demo.cpp
+)
+target_link_libraries(warpdes_entity_migration_demo PRIVATE warpdes)
+
+if(WARPSIM_ENABLE_EXAMPLE_SMOKE_TESTS)
+	add_test(NAME warpdes.example_entity_migration_demo COMMAND $<TARGET_FILE:warpdes_entity_migration_demo>)
+endif()
+
 add_executable(warpdes_market_demo
 	market_demo.cpp
 )

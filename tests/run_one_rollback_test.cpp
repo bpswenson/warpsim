@@ -1,3 +1,10 @@
+/*
+Purpose: Tests single-step execution (run_one) in the presence of rollback.
+
+What this tests: The kernel can make incremental progress, handle a straggler-triggered
+rollback, restore state, and still converge on the correct final result.
+*/
+
 #include "simulation.hpp"
 #include "transport.hpp"
 

@@ -6,6 +6,9 @@
 namespace warpsim
 {
     // Unique id to match anti-messages to the original event.
+    //
+    // Note: EventUid is only required to be unique per sender LP (Event.src).
+    // The kernel treats (src, uid) as the anti-match identity.
     using EventUid = std::uint64_t;
 
     struct Event
@@ -32,6 +35,10 @@ namespace warpsim
             if (b.ts < a.ts)
             {
                 return false;
+            }
+            if (a.src != b.src)
+            {
+                return a.src < b.src;
             }
             return a.uid < b.uid;
         }

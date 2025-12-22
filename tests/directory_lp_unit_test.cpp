@@ -1,3 +1,10 @@
+/*
+Purpose: Unit tests for the Directory LP implementation.
+
+What this tests: The directory correctly forwards events based on owner-at-time, rewrites
+source/uid/sequence as required, and applies updates/installs deterministically.
+*/
+
 #include "directory_lp.hpp"
 
 #include <cassert>
@@ -29,10 +36,11 @@ namespace
 
         void request_write(warpsim::EntityId id) override { requestedWrites.push_back(id); }
 
-        void emit_committed(warpsim::TimeStamp, warpsim::Payload) override {}
+        void emit_committed(warpsim::TimeStamp ts, warpsim::Payload p) override { committed.push_back(std::pair{ts, std::move(p)}); }
 
         std::vector<warpsim::Event> sent;
         std::vector<warpsim::EntityId> requestedWrites;
+        std::vector<std::pair<warpsim::TimeStamp, warpsim::Payload>> committed;
     };
 
     warpsim::Payload pack_update(UpdateArgs a)
@@ -60,6 +68,7 @@ int main()
         cfg.id = 10;
         cfg.stateEntityId = kDirState;
         cfg.updateOwnerKind = KindUpdate;
+        cfg.migrationLogKind = 0xBEEF;
         cfg.decodeUpdate = [](const warpsim::Event &ev) -> warpsim::DirectoryUpdate
         {
             if (ev.payload.bytes.size() != sizeof(UpdateArgs))
@@ -128,7 +137,20 @@ int main()
         assert(install.target == in.target);
         assert(install.payload.kind == KindInstall);
 
+        // Migration log record should be emitted as committed output.
+        assert(ctx.committed.size() == 1);
+        assert(ctx.committed[0].first == upd.ts);
+        assert(ctx.committed[0].second.kind == cfg.migrationLogKind);
+        assert(ctx.committed[0].second.bytes.size() == sizeof(warpsim::DirectoryMigrationLog));
+        warpsim::DirectoryMigrationLog log{};
+        std::memcpy(&log, ctx.committed[0].second.bytes.data(), sizeof(log));
+        assert(log.entity == in.target);
+        assert(log.oldOwner == 7);
+        assert(log.newOwner == 3);
+        assert(log.sentInstall == 1);
+
         ctx.sent.clear();
+        ctx.committed.clear();
 
         // After update, forwarding at later time should go to new owner.
         warpsim::Event in2 = in;

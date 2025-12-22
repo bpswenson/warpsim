@@ -1,3 +1,10 @@
+/*
+Purpose: Ensures StateHistory can discard snapshots after a rollback point.
+
+What this tests: drop_after(ts) removes snapshots strictly after ts, so rollback can
+truncate history and subsequent reads see the correct earlier snapshot.
+*/
+
 #include "state_store.hpp"
 
 #include <cassert>

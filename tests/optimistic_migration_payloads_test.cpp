@@ -1,3 +1,10 @@
+/*
+Purpose: Unit tests for optimistic migration payload helpers.
+
+What this tests: Helper functions correctly build and parse update-owner, directory-update,
+and install payloads (including basic validation/error paths).
+*/
+
 #include "optimistic_migration.hpp"
 
 #include <cassert>

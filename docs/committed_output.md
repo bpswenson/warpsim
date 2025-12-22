@@ -45,8 +45,9 @@ The sink is invoked by the kernel in **deterministic order**, sorted by:
 
 1. timestamp
 2. LPId
-3. originating event uid
-4. per-event output index
+3. originating event src
+4. originating event uid
+5. per-event output index
 
 ## What this is (and isn’t)
 

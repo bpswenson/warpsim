@@ -1,3 +1,10 @@
+/*
+Purpose: Verifies GVT-safe committed output behavior.
+
+What this tests: Side effects emitted via emit_committed() are only delivered once they
+are safe (past GVT) and are ordered deterministically.
+*/
+
 #include "simulation.hpp"
 #include "transport.hpp"
 

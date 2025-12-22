@@ -1,3 +1,10 @@
+/*
+Purpose: Tests StateHistory capacity trimming.
+
+What this tests: When maxSnapshots is exceeded, the oldest snapshots are trimmed and
+later queries still return correct data from the remaining snapshots.
+*/
+
 #include "state_store.hpp"
 
 #include <cassert>

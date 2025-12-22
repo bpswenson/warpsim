@@ -1,3 +1,10 @@
+/*
+Purpose: Regression test for sequence determinism across rollback.
+
+What this tests: After rollback, the sender's next auto-assigned sequence counter is
+restored, so re-executed sends get the same sequences as the first run.
+*/
+
 #include "simulation.hpp"
 #include "transport.hpp"
 

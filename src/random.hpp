@@ -34,8 +34,11 @@ namespace warpsim
     // - seed: global simulation seed
     // - lp: logical process id (stable across rank mappings)
     // - stream: user-chosen stream id to separate subsystems
-    // - eventUid: uid of the event that is being processed (stable anti-match key)
+    // - eventUid: 64-bit key for the event being processed
     // - draw: draw index within that event (0,1,2...)
+    //
+    // Note: EventUid is not guaranteed globally unique across all senders; if you are
+    // hashing actual events, prefer the overload that also includes eventSrc.
     inline std::uint64_t rng_u64(std::uint64_t seed,
                                  LPId lp,
                                  std::uint32_t stream,
@@ -45,6 +48,24 @@ namespace warpsim
         std::uint64_t x = seed;
         x = mix_u64(x, static_cast<std::uint64_t>(lp));
         x = mix_u64(x, static_cast<std::uint64_t>(stream));
+        x = mix_u64(x, static_cast<std::uint64_t>(eventUid));
+        x = mix_u64(x, static_cast<std::uint64_t>(draw));
+        return splitmix64(x);
+    }
+
+    // Overload that additionally salts by the event sender (src). This is useful when
+    // EventUid is only unique per-src.
+    inline std::uint64_t rng_u64(std::uint64_t seed,
+                                 LPId lp,
+                                 std::uint32_t stream,
+                                 LPId eventSrc,
+                                 EventUid eventUid,
+                                 std::uint32_t draw = 0) noexcept
+    {
+        std::uint64_t x = seed;
+        x = mix_u64(x, static_cast<std::uint64_t>(lp));
+        x = mix_u64(x, static_cast<std::uint64_t>(stream));
+        x = mix_u64(x, static_cast<std::uint64_t>(eventSrc));
         x = mix_u64(x, static_cast<std::uint64_t>(eventUid));
         x = mix_u64(x, static_cast<std::uint64_t>(draw));
         return splitmix64(x);
@@ -63,6 +84,18 @@ namespace warpsim
         return static_cast<double>(mantissa) * (1.0 / 9007199254740992.0); // 2^53
     }
 
+    inline double rng_unit_double(std::uint64_t seed,
+                                  LPId lp,
+                                  std::uint32_t stream,
+                                  LPId eventSrc,
+                                  EventUid eventUid,
+                                  std::uint32_t draw = 0) noexcept
+    {
+        const std::uint64_t r = rng_u64(seed, lp, stream, eventSrc, eventUid, draw);
+        const std::uint64_t mantissa = r >> 11;
+        return static_cast<double>(mantissa) * (1.0 / 9007199254740992.0);
+    }
+
     // Uniform integer in [lo, hi] (inclusive). Undefined if lo > hi.
     inline std::uint64_t rng_u64_range(std::uint64_t seed,
                                        LPId lp,
@@ -75,6 +108,20 @@ namespace warpsim
         const std::uint64_t span = (hi - lo) + 1;
         const std::uint64_t r = rng_u64(seed, lp, stream, eventUid, draw);
         // Modulo bias is acceptable for most simulation use; can upgrade later if needed.
+        return lo + (r % span);
+    }
+
+    inline std::uint64_t rng_u64_range(std::uint64_t seed,
+                                       LPId lp,
+                                       std::uint32_t stream,
+                                       LPId eventSrc,
+                                       EventUid eventUid,
+                                       std::uint64_t lo,
+                                       std::uint64_t hi,
+                                       std::uint32_t draw = 0) noexcept
+    {
+        const std::uint64_t span = (hi - lo) + 1;
+        const std::uint64_t r = rng_u64(seed, lp, stream, eventSrc, eventUid, draw);
         return lo + (r % span);
     }
 }

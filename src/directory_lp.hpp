@@ -12,6 +12,17 @@
 
 namespace warpsim
 {
+    // Optional committed-output record emitted by DirectoryLP when a migration update is applied.
+    // This is rollback-safe (tied to the update-owner event) and intended for verification.
+    struct DirectoryMigrationLog
+    {
+        EntityId entity = 0;
+        LPId oldOwner = 0;
+        LPId newOwner = 0;
+        std::uint8_t sentInstall = 0;
+        std::uint8_t _pad[3]{};
+    };
+
     struct DirectoryUpdate
     {
         EntityId entity = 0;
@@ -35,6 +46,12 @@ namespace warpsim
         // `ev.payload.kind == updateOwnerKind`.
         std::uint32_t updateOwnerKind = 0;
         std::function<DirectoryUpdate(const Event &)> decodeUpdate;
+
+        // Optional: if set (non-zero), emit committed output whenever an update-owner event
+        // is applied. The payload bytes are a trivially-copyable DirectoryMigrationLog.
+        // This makes it easy to verify that migrations occurred (and when) without
+        // relying on non-rollback-safe printing.
+        std::uint32_t migrationLogKind = 0;
 
         // Optional: fossil collection for directory ownership history.
         // If set, the directory treats events with `payload.kind == fossilCollectKind`
@@ -97,6 +114,8 @@ namespace warpsim
 
                 const DirectoryUpdate u = m_cfg.decodeUpdate(ev);
 
+                const LPId oldOwner = owner_at_(u.entity, ev.ts);
+
                 ctx.request_write(m_cfg.stateEntityId);
                 m_ownerHistory[u.entity][ev.ts] = u.newOwner;
 
@@ -109,6 +128,19 @@ namespace warpsim
                     install.target = u.entity;
                     install.payload = u.installPayload;
                     ctx.send(std::move(install));
+                }
+
+                if (m_cfg.migrationLogKind != 0)
+                {
+                    Payload p;
+                    p.kind = m_cfg.migrationLogKind;
+                    p.bytes = bytes_from_trivially_copyable(DirectoryMigrationLog{
+                        .entity = u.entity,
+                        .oldOwner = oldOwner,
+                        .newOwner = u.newOwner,
+                        .sentInstall = static_cast<std::uint8_t>(u.sendInstall ? 1 : 0),
+                    });
+                    ctx.emit_committed(ev.ts, std::move(p));
                 }
                 return;
             }

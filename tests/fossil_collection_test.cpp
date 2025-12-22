@@ -1,3 +1,10 @@
+/*
+Purpose: Ensures fossil collection runs and advances safely.
+
+What this tests: As logical time progresses and GVT advances, the simulator can discard
+old history without breaking execution (basic single-process fossil-collection sanity).
+*/
+
 #include "simulation.hpp"
 
 #include <cassert>

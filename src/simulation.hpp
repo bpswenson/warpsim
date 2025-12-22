@@ -86,7 +86,7 @@ namespace warpsim
         std::uint64_t collectivePeriodIters = 1;
 
         // Global deterministic seed for model RNG.
-        // Models should derive random values from this seed + LPId + EventUid so results
+        // Models should derive random values from this seed + LPId + (Event.src, Event.uid) so results
         // are deterministic across rollback and MPI rank remaps.
         std::uint64_t seed = 1;
 
@@ -99,6 +99,23 @@ namespace warpsim
         // safe (event timestamp < global virtual time). This prevents duplicate side effects when
         // optimistic execution rolls back.
         std::function<void(RankId, LPId, TimeStamp, const Payload &)> committedSink;
+
+        // Optional sink for *events* once they become irrevocable (ts < GVT).
+        //
+        // This is intended for determinism/correctness testing: if two runs are equivalent,
+        // the sequence of committed events should match exactly.
+        //
+        // Notes:
+        // - This fires only when an event record is fossil-collected (ts < global GVT).
+        // - Anti-messages are also events; callers may choose to ignore `ev.isAnti`.
+        std::function<void(RankId, LPId, const Event &)> committedEventSink;
+
+        // Enable extra runtime invariant checks (throws on violation).
+#if defined(WARPSIM_ENABLE_INVARIANT_CHECKS_DEFAULT)
+        bool enableInvariantChecks = (WARPSIM_ENABLE_INVARIANT_CHECKS_DEFAULT != 0);
+#else
+        bool enableInvariantChecks = false;
+#endif
     };
 
     // Minimal optimistic Time Warp (single-rank core) with explicit transport hooks.
@@ -214,6 +231,7 @@ namespace warpsim
                     if (m_cfg.gvtMode == SimulationConfig::GvtMode::AckInflight)
                     {
                         WireWriter w;
+                        w.write_u32(ev.src);
                         w.write_u64(ev.uid);
                         w.write_u8(static_cast<std::uint8_t>(ev.isAnti ? 1 : 0));
                         WireMessage ack;
@@ -244,9 +262,10 @@ namespace warpsim
                         continue;
                     }
                     WireReader r(std::span<const std::byte>(msg->bytes.data(), msg->bytes.size()));
+                    const auto src = static_cast<LPId>(r.read_u32());
                     const auto uid = static_cast<EventUid>(r.read_u64());
                     const bool isAnti = (r.read_u8() != 0);
-                    clear_inflight_key_(InflightKey{uid, isAnti});
+                    clear_inflight_key_(InflightKey{src, uid, isAnti});
                 }
             }
         }
@@ -394,19 +413,20 @@ namespace warpsim
         // IEventSink
         void send(Event ev) override
         {
+            validate_invariants_("send:entry");
+
             // Assign uid if caller didn't.
             if (ev.uid == 0)
             {
-                // UIDs must be globally unique so anti-messages cancel the right event.
-                // Also keep them deterministic regardless of MPI rank mapping.
-                // Format: [src LPId:32][per-LP counter:32].
+                // Anti-messages cancel by (src, uid), so uid must be unique per-src.
+                // Keep it deterministic regardless of MPI rank mapping.
                 auto &ctx = ctx_(ev.src);
-                if (ctx.nextUid == 0)
+                const std::uint64_t local = ctx.nextUid++;
+                if (local == 0)
                 {
-                    throw std::runtime_error("Event UID counter overflow for LPId (exhausted 2^32-1 UIDs)");
+                    throw std::runtime_error("Event UID counter overflow for LPId (exhausted 2^64-1 UIDs)");
                 }
-                const std::uint32_t local = ctx.nextUid++;
-                ev.uid = (static_cast<std::uint64_t>(ev.src) << 32) | static_cast<std::uint64_t>(local);
+                ev.uid = static_cast<EventUid>(local);
             }
 
             // Auto-assign sequence if caller didn't set it.
@@ -420,14 +440,29 @@ namespace warpsim
             // entity, route to that owner regardless of the caller-provided dst.
             if (ev.target != 0)
             {
+                constexpr LPId UnsetDst = std::numeric_limits<LPId>::max();
+
                 if (m_cfg.directoryForEntity)
                 {
                     const LPId dir = m_cfg.directoryForEntity(ev.target);
+                    if (dir == 0)
+                    {
+                        throw std::runtime_error("send: directoryForEntity returned LPId=0 for target entity");
+                    }
                     m_directoryLps.insert(dir);
                     // Avoid re-routing forwarded events emitted by the directory itself.
                     if (ev.src != dir)
                     {
+                        const LPId prevDst = ev.dst;
                         ev.dst = dir;
+
+                        Logger::instance().logf(LogLevel::Trace, m_cfg.rank, ev.src, ev.ts,
+                                                "route targeted event via directory: entity=%llu kind=%u prev_dst=%u dir=%u uid=%llu",
+                                                static_cast<unsigned long long>(ev.target),
+                                                static_cast<unsigned>(ev.payload.kind),
+                                                static_cast<unsigned>(prevDst),
+                                                static_cast<unsigned>(dir),
+                                                static_cast<unsigned long long>(ev.uid));
                     }
                 }
                 else
@@ -436,7 +471,23 @@ namespace warpsim
                     if (it != m_entityOwner.end())
                     {
                         ev.dst = it->second;
+
+                        Logger::instance().logf(LogLevel::Trace, m_cfg.rank, ev.src, ev.ts,
+                                                "route targeted event via owner map: entity=%llu kind=%u owner=%u uid=%llu",
+                                                static_cast<unsigned long long>(ev.target),
+                                                static_cast<unsigned>(ev.payload.kind),
+                                                static_cast<unsigned>(ev.dst),
+                                                static_cast<unsigned long long>(ev.uid));
                     }
+                }
+
+                // Safety: targeted events must be routable.
+                // Model helpers like modeling::send_targeted intentionally use an "unset" dst sentinel;
+                // if the kernel cannot resolve an owner/directory, letting the event proceed would
+                // silently drop/misroute work.
+                if (ev.dst == UnsetDst)
+                {
+                    throw std::runtime_error("send: event has target!=0 but dst is unset after routing (enable directoryForEntity or ensure an owner is established)");
                 }
             }
 
@@ -461,6 +512,8 @@ namespace warpsim
                     ++m_sentEvents;
                 }
                 enqueue_(std::move(ev));
+
+                validate_invariants_("send:local_enqueue");
 
                 // Log for potential rollback -> anti-messages.
                 if (!ev.isAnti)
@@ -511,19 +564,117 @@ namespace warpsim
                 const TimeStamp sendTime = ctx.inEvent ? ctx.currentExecTs : TimeStamp{0, 0};
                 ctx.sentLog.push_back(SentRecord{sendTime, ev.ts, ev.dst, ev.uid});
             }
+
+            validate_invariants_("send:exit");
         }
 
     private:
+        void invariant_or_throw_(bool ok, const char *msg) const
+        {
+            if (!m_cfg.enableInvariantChecks)
+            {
+                return;
+            }
+            if (!ok)
+            {
+                throw std::runtime_error(msg);
+            }
+        }
+
+        void validate_invariants_(const char *where) const
+        {
+            if (!m_cfg.enableInvariantChecks)
+            {
+                return;
+            }
+
+            // Per-LP invariants.
+            for (const auto &[id, ctx] : m_lps)
+            {
+                (void)id;
+                invariant_or_throw_(ctx.nextSeq != 0, "invariant: nextSeq must be non-zero");
+                invariant_or_throw_(ctx.nextUid != 0, "invariant: nextUid must be non-zero");
+
+                // Processed records must be in non-decreasing timestamp order.
+                for (std::size_t i = 1; i < ctx.processed.size(); ++i)
+                {
+                    invariant_or_throw_(!(ctx.processed[i].ev.ts < ctx.processed[i - 1].ev.ts), "invariant: processed not sorted by timestamp");
+                }
+
+                // Virtual time must not be behind the latest processed record.
+                if (!ctx.processed.empty())
+                {
+                    invariant_or_throw_(!(ctx.vt < ctx.processed.back().ev.ts), "invariant: vt behind last processed timestamp");
+                }
+
+                if (ctx.inEvent)
+                {
+                    invariant_or_throw_(ctx.currentExecTs == ctx.vt, "invariant: inEvent implies currentExecTs==vt");
+                }
+            }
+
+            // Inflight bookkeeping must match multiset (AckInflight mode).
+            if (m_cfg.gvtMode == SimulationConfig::GvtMode::AckInflight)
+            {
+                invariant_or_throw_(m_inflightByUid.size() == m_inflightTs.size(), "invariant: inflightByUid size != inflightTs size");
+                std::multiset<TimeStamp> derived;
+                for (const auto &kv : m_inflightByUid)
+                {
+                    derived.insert(kv.second);
+                }
+                invariant_or_throw_(derived.size() == m_inflightTs.size(), "invariant: derived inflight multiset size mismatch");
+                invariant_or_throw_(std::equal(derived.begin(), derived.end(), m_inflightTs.begin(), m_inflightTs.end()),
+                                    "invariant: inflightTs does not match inflightByUid timestamps");
+            }
+
+            // Pending queue ordering: verify the priority_queue would pop in non-decreasing order
+            // (skipping cancelled tombstones), using the same comparison semantics.
+            {
+                auto pq = m_pending;
+                std::optional<Event> prev;
+                while (!pq.empty())
+                {
+                    Event ev = pq.top();
+                    pq.pop();
+
+                    if (!ev.isAnti && m_cancelledByUid.count(UidKey{ev.src, ev.uid}) != 0)
+                    {
+                        continue;
+                    }
+
+                    if (prev)
+                    {
+                        // Must be non-decreasing in (ts, src, uid).
+                        invariant_or_throw_(!((ev.ts < prev->ts) ||
+                                              ((ev.ts == prev->ts) && (ev.src < prev->src)) ||
+                                              ((ev.ts == prev->ts) && (ev.src == prev->src) && (ev.uid < prev->uid))),
+                                            "invariant: pending queue pops out of order");
+                    }
+                    prev = ev;
+                }
+            }
+
+            (void)where;
+        }
+
         struct CommittedOutput
         {
             TimeStamp ts;
             Payload payload;
         };
 
+        struct CommittedEventFlushItem
+        {
+            TimeStamp ts;
+            LPId lp = 0;
+            Event ev;
+        };
+
         struct CommittedFlushItem
         {
             TimeStamp ts;
             LPId lp = 0;
+            LPId eventSrc = 0;
             EventUid eventUid = 0;
             std::uint32_t index = 0;
             Payload payload;
@@ -531,12 +682,13 @@ namespace warpsim
 
         struct InflightKey
         {
+            LPId src = 0;
             EventUid uid = 0;
             bool isAnti = false;
 
             bool operator==(const InflightKey &o) const noexcept
             {
-                return uid == o.uid && isAnti == o.isAnti;
+                return src == o.src && uid == o.uid && isAnti == o.isAnti;
             }
         };
 
@@ -544,7 +696,26 @@ namespace warpsim
         {
             std::size_t operator()(const InflightKey &k) const noexcept
             {
-                const std::uint64_t x = (static_cast<std::uint64_t>(k.uid) << 1) ^ (k.isAnti ? 1ULL : 0ULL);
+                const std::uint64_t x = (static_cast<std::uint64_t>(k.src) << 33) ^
+                                        (static_cast<std::uint64_t>(k.uid) << 1) ^
+                                        (k.isAnti ? 1ULL : 0ULL);
+                return static_cast<std::size_t>(x ^ (x >> 33) ^ (x >> 17));
+            }
+        };
+
+        struct UidKey
+        {
+            LPId src = 0;
+            EventUid uid = 0;
+
+            bool operator==(const UidKey &o) const noexcept { return src == o.src && uid == o.uid; }
+        };
+
+        struct UidKeyHash
+        {
+            std::size_t operator()(const UidKey &k) const noexcept
+            {
+                const std::uint64_t x = (static_cast<std::uint64_t>(k.src) << 32) ^ static_cast<std::uint64_t>(k.uid);
                 return static_cast<std::size_t>(x ^ (x >> 33) ^ (x >> 17));
             }
         };
@@ -579,7 +750,7 @@ namespace warpsim
             std::vector<CommittedOutput> committed;
 
             // Anti-message bookkeeping (rollbackable).
-            // If ev.isAnti is true, we record the prior state of the cancellation map for ev.uid
+            // If ev.isAnti is true, we record the prior state of the cancellation map for (ev.src, ev.uid)
             // so rollback can restore it.
             bool cancelHadEntry = false;
             TimeStamp cancelPrevTs{0, 0};
@@ -597,7 +768,7 @@ namespace warpsim
             std::deque<SentRecord> sentLog;
 
             std::uint64_t nextSeq = 1;
-            std::uint32_t nextUid = 1;
+            std::uint64_t nextUid = 1;
         };
 
         struct PendingOrder
@@ -612,6 +783,10 @@ namespace warpsim
                 if (a.ts < b.ts)
                 {
                     return false;
+                }
+                if (a.src != b.src)
+                {
+                    return b.src < a.src;
                 }
                 return b.uid < a.uid;
             }
@@ -644,7 +819,7 @@ namespace warpsim
 
         void track_inflight_send_(const Event &ev)
         {
-            auto [it, inserted] = m_inflightByUid.emplace(InflightKey{ev.uid, ev.isAnti}, ev.ts);
+            auto [it, inserted] = m_inflightByUid.emplace(InflightKey{ev.src, ev.uid, ev.isAnti}, ev.ts);
             if (inserted)
             {
                 m_inflightTs.insert(ev.ts);
@@ -653,7 +828,7 @@ namespace warpsim
 
         void track_inflight_recv_(const Event &ev)
         {
-            auto it = m_inflightByUid.find(InflightKey{ev.uid, ev.isAnti});
+            auto it = m_inflightByUid.find(InflightKey{ev.src, ev.uid, ev.isAnti});
             if (it == m_inflightByUid.end())
             {
                 return;
@@ -688,7 +863,7 @@ namespace warpsim
             while (!m_pending.empty())
             {
                 const auto &top = m_pending.top();
-                if (m_cancelledByUid.count(top.uid) == 0)
+                if (m_cancelledByUid.count(UidKey{top.src, top.uid}) == 0)
                 {
                     return top.ts;
                 }
@@ -725,6 +900,7 @@ namespace warpsim
         void prune_to_gvt_(TimeStamp gvt)
         {
             std::vector<CommittedFlushItem> flush;
+            std::vector<CommittedEventFlushItem> committedEvents;
             for (auto &[id, ctx] : m_lps)
             {
                 (void)id;
@@ -734,6 +910,17 @@ namespace warpsim
                     auto rec = std::move(ctx.processed.front());
                     ctx.processed.pop_front();
 
+                    invariant_or_throw_(rec.ev.ts < gvt, "prune_to_gvt_: attempted to commit non-GVT-safe event");
+
+                    if (m_cfg.committedEventSink)
+                    {
+                        committedEvents.push_back(CommittedEventFlushItem{
+                            .ts = rec.ev.ts,
+                            .lp = id,
+                            .ev = std::move(rec.ev),
+                        });
+                    }
+
                     if (m_cfg.committedSink)
                     {
                         for (std::size_t i = 0; i < rec.committed.size(); ++i)
@@ -742,6 +929,7 @@ namespace warpsim
                             flush.push_back(CommittedFlushItem{
                                 .ts = c.ts,
                                 .lp = id,
+                                .eventSrc = rec.ev.src,
                                 .eventUid = rec.ev.uid,
                                 .index = static_cast<std::uint32_t>(i),
                                 .payload = std::move(c.payload),
@@ -784,6 +972,10 @@ namespace warpsim
                               {
                                   return a.lp < b.lp;
                               }
+                              if (a.eventSrc != b.eventSrc)
+                              {
+                                  return a.eventSrc < b.eventSrc;
+                              }
                               if (a.eventUid != b.eventUid)
                               {
                                   return a.eventUid < b.eventUid;
@@ -795,10 +987,46 @@ namespace warpsim
                     m_cfg.committedSink(m_cfg.rank, it.lp, it.ts, it.payload);
                 }
             }
+
+            if (m_cfg.committedEventSink && !committedEvents.empty())
+            {
+                std::sort(committedEvents.begin(), committedEvents.end(), [](const CommittedEventFlushItem &a, const CommittedEventFlushItem &b)
+                          {
+                              if (a.ts < b.ts)
+                              {
+                                  return true;
+                              }
+                              if (b.ts < a.ts)
+                              {
+                                  return false;
+                              }
+                              if (a.lp != b.lp)
+                              {
+                                  return a.lp < b.lp;
+                              }
+                              if (a.ev.src != b.ev.src)
+                              {
+                                  return a.ev.src < b.ev.src;
+                              }
+                              // Tie-break on (src,uid) for deterministic ordering.
+                              if (a.ev.uid != b.ev.uid)
+                              {
+                                  return a.ev.uid < b.ev.uid;
+                              }
+                              // As a last resort, sort non-anti before anti.
+                              return (a.ev.isAnti ? 1 : 0) < (b.ev.isAnti ? 1 : 0); });
+
+                for (const auto &it : committedEvents)
+                {
+                    m_cfg.committedEventSink(m_cfg.rank, it.lp, it.ev);
+                }
+            }
         }
 
         void fossil_collect_(bool doGlobalReduction)
         {
+            validate_invariants_("fossil_collect:entry");
+
             // Fossil collection is only safe once we have a *global* lower bound on
             // timestamps of any future messages. For single-rank, compute_gvt_ is
             // sufficient. For multi-rank, callers must provide gvtReduceMin (e.g.
@@ -818,6 +1046,7 @@ namespace warpsim
             // Multi-rank: only advance when it's time to participate in the global collective.
             if (m_cfg.lpToRank && !doGlobalReduction)
             {
+                validate_invariants_("fossil_collect:early_exit_no_collective");
                 return;
             }
 
@@ -826,6 +1055,7 @@ namespace warpsim
                 advance_gvt_colored_();
                 apply_ready_migrations_();
                 notify_directories_gvt_(m_lastGvt);
+                validate_invariants_("fossil_collect:exit_colored");
                 return;
             }
 
@@ -837,12 +1067,15 @@ namespace warpsim
             }
             if (gvt < m_lastGvt)
             {
+                validate_invariants_("fossil_collect:exit_no_advance");
                 return;
             }
             m_lastGvt = gvt;
             prune_to_gvt_(m_lastGvt);
             apply_ready_migrations_();
             notify_directories_gvt_(m_lastGvt);
+
+            validate_invariants_("fossil_collect:exit");
         }
 
         void notify_directories_gvt_(TimeStamp gvt)
@@ -955,7 +1188,7 @@ namespace warpsim
             {
                 Event ev = m_pending.top();
                 m_pending.pop();
-                if (!ev.isAnti && m_cancelledByUid.count(ev.uid) != 0)
+                if (!ev.isAnti && m_cancelledByUid.count(UidKey{ev.src, ev.uid}) != 0)
                 {
                     continue;
                 }
@@ -966,6 +1199,8 @@ namespace warpsim
 
         void dispatch_(const Event &ev)
         {
+            validate_invariants_("dispatch:entry");
+
             // Anti-messages cancel a matching event if still pending or unprocessed.
             if (ev.isAnti)
             {
@@ -985,7 +1220,7 @@ namespace warpsim
                 rec.ev = ev;
                 rec.preNextSeq = dstCtx.nextSeq;
 
-                if (auto it = m_cancelledByUid.find(ev.uid); it != m_cancelledByUid.end())
+                if (auto it = m_cancelledByUid.find(UidKey{ev.src, ev.uid}); it != m_cancelledByUid.end())
                 {
                     rec.cancelHadEntry = true;
                     rec.cancelPrevTs = it->second;
@@ -998,6 +1233,8 @@ namespace warpsim
 
                 // Record anti processing so its cancellation effect can be rolled back.
                 dstCtx.processed.push_back(std::move(rec));
+
+                validate_invariants_("dispatch:exit_anti");
                 return;
             }
 
@@ -1019,6 +1256,7 @@ namespace warpsim
                 // select the next event in timestamp order. This avoids processing the
                 // straggler out-of-order relative to other events reintroduced by rollback.
                 enqueue_(ev);
+                validate_invariants_("dispatch:exit_straggler");
                 return;
             }
 
@@ -1079,13 +1317,15 @@ namespace warpsim
             dstCtx.processed.push_back(std::move(rec));
 
             ++m_totalProcessed;
+
+            validate_invariants_("dispatch:exit");
         }
 
         void cancel_(const Event &anti)
         {
             // If the corresponding event is still pending, we do a lazy cancel:
-            // record tombstone uid and skip when popped.
-            auto [it, inserted] = m_cancelledByUid.emplace(anti.uid, anti.ts);
+            // record tombstone (src, uid) and skip when popped.
+            auto [it, inserted] = m_cancelledByUid.emplace(UidKey{anti.src, anti.uid}, anti.ts);
             if (!inserted && anti.ts < it->second)
             {
                 it->second = anti.ts;
@@ -1097,7 +1337,7 @@ namespace warpsim
             {
                 // Match only the original (non-anti) event. Anti-messages reuse the cancelled
                 // event's UID, so matching anti records here would cause spurious rollbacks.
-                if (!it->ev.isAnti && it->ev.uid == anti.uid)
+                if (!it->ev.isAnti && it->ev.src == anti.src && it->ev.uid == anti.uid)
                 {
                     ++m_antiCancelledProcessed;
                     ++m_rollbacksAnti;
@@ -1116,6 +1356,7 @@ namespace warpsim
 
         void rollback_(LPContext &ctx, TimeStamp to)
         {
+            validate_invariants_("rollback:entry");
             ++m_rollbacksTotal;
 
             // Undo all processed events with timestamp >= `to`.
@@ -1134,11 +1375,11 @@ namespace warpsim
                 {
                     if (last.cancelHadEntry)
                     {
-                        m_cancelledByUid[last.ev.uid] = last.cancelPrevTs;
+                        m_cancelledByUid[UidKey{last.ev.src, last.ev.uid}] = last.cancelPrevTs;
                     }
                     else
                     {
-                        m_cancelledByUid.erase(last.ev.uid);
+                        m_cancelledByUid.erase(UidKey{last.ev.src, last.ev.uid});
                     }
                 }
 
@@ -1216,6 +1457,8 @@ namespace warpsim
 
                 ctx.sentLog.pop_back();
             }
+
+            validate_invariants_("rollback:exit");
         }
 
         void apply_migration_(const Migration &mig)
@@ -1235,8 +1478,8 @@ namespace warpsim
         bool m_started = false;
         std::priority_queue<Event, std::vector<Event>, PendingOrder> m_pending;
 
-        // Tombstones for cancelled UIDs (anti-messages). Timestamp used for fossil collection.
-        std::unordered_map<EventUid, TimeStamp> m_cancelledByUid;
+        // Tombstones for cancelled (src,uid) pairs (anti-messages). Timestamp used for fossil collection.
+        std::unordered_map<UidKey, TimeStamp, UidKeyHash> m_cancelledByUid;
 
         void start_if_needed_()
         {

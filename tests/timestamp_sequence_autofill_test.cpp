@@ -1,3 +1,10 @@
+/*
+Purpose: Verifies automatic timestamp sequence assignment.
+
+What this tests: When an event is sent with ts.sequence==0, the kernel assigns a
+deterministic per-sender increasing sequence number to break ties consistently.
+*/
+
 #include "simulation.hpp"
 #include "transport.hpp"
 
