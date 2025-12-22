@@ -71,6 +71,11 @@ if(WARPSIM_ENABLE_MPI_TESTS)
 	)
 
 	add_test(
+		NAME warpdes.mpi_phold_5ranks
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 5 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_phold_mpi> ${MPIEXEC_POSTFLAGS} --lps 1024 --init 1 --end 10000 --remote 0.9 --lookahead 5 --seed 1 --emit-mod 16 --verify --expected-hash 339321921475465244
+	)
+
+	add_test(
 		NAME warpdes.mpi_phold_20ranks
 		COMMAND ${MPIEXEC_EXECUTABLE} --oversubscribe ${MPIEXEC_NUMPROC_FLAG} 20 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_phold_mpi> ${MPIEXEC_POSTFLAGS} --lps 1024 --init 1 --end 10000 --remote 0.9 --lookahead 5 --seed 1 --emit-mod 16 --verify --expected-hash 339321921475465244
 	)
@@ -79,6 +84,11 @@ if(WARPSIM_ENABLE_MPI_TESTS)
 	add_test(
 		NAME warpdes.mpi_airport_fujimoto_3ranks
 		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_airport_fujimoto> ${MPIEXEC_POSTFLAGS} --airports 8 --planes 64 --end 400 --service-max 5 --flight-max 9 --seed 1 --emit-plane-mod 4 --verify --expected-hash 4209842363547979520
+	)
+
+	add_test(
+		NAME warpdes.mpi_airport_fujimoto_5ranks
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 5 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_airport_fujimoto> ${MPIEXEC_POSTFLAGS} --airports 8 --planes 64 --end 400 --service-max 5 --flight-max 9 --seed 1 --emit-plane-mod 4 --verify --expected-hash 4209842363547979520
 	)
 
 	add_test(
