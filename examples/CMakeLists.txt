@@ -34,6 +34,12 @@ if(WARPSIM_ENABLE_EXAMPLE_SMOKE_TESTS)
 	add_test(NAME warpdes.example_radar_explosion_demo COMMAND $<TARGET_FILE:warpdes_radar_explosion_demo>)
 endif()
 
+add_executable(warpdes_airplanes_missile_aoi_demo airplanes_missile_aoi_demo.cpp)
+target_link_libraries(warpdes_airplanes_missile_aoi_demo PRIVATE warpdes)
+if(WARPSIM_ENABLE_MPI_TESTS)
+	target_link_libraries(warpdes_airplanes_missile_aoi_demo PRIVATE MPI::MPI_CXX)
+	target_compile_definitions(warpdes_airplanes_missile_aoi_demo PRIVATE WARPSIM_HAS_MPI=1)
+endif()
 add_executable(warpdes_airport_fujimoto
 	airport_fujimoto.cpp
 )
@@ -95,4 +101,18 @@ if(WARPSIM_ENABLE_MPI_TESTS)
 		NAME warpdes.mpi_airport_fujimoto_20ranks
 		COMMAND ${MPIEXEC_EXECUTABLE} --oversubscribe ${MPIEXEC_NUMPROC_FLAG} 20 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_airport_fujimoto> ${MPIEXEC_POSTFLAGS} --airports 8 --planes 64 --end 400 --service-max 5 --flight-max 9 --seed 1 --emit-plane-mod 4 --verify --expected-hash 4209842363547979520
 	)
+
+	# Airplanes + missiles + AOI demo (MPI smoke at multiple sizes).
+	add_test(
+		NAME warpdes.mpi_airplanes_missile_aoi_3ranks
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 3 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_airplanes_missile_aoi_demo> ${MPIEXEC_POSTFLAGS} --regions 4 --planes-per-region 8 --end 60 --seed 1 --query-every 1000
+	)
+
+	add_test(
+		NAME warpdes.mpi_airplanes_missile_aoi_5ranks
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 5 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_airplanes_missile_aoi_demo> ${MPIEXEC_POSTFLAGS} --regions 4 --planes-per-region 8 --end 60 --seed 1 --query-every 1000
+	)
+
+	set_tests_properties(warpdes.mpi_airplanes_missile_aoi_3ranks PROPERTIES TIMEOUT 45)
+	set_tests_properties(warpdes.mpi_airplanes_missile_aoi_5ranks PROPERTIES TIMEOUT 45)
 endif()

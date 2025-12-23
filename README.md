@@ -13,6 +13,12 @@ Core features:
 
 This repo builds a library (`warpdes`) plus unit tests and examples under `tests/` and `examples/`.
 
+## Correctness-first (current priority)
+
+Right now, **correctness and determinism are prioritized over speed**.
+
+In particular, we aim for behavior that is stable under different MPI sizes and different LP→rank assignments (e.g., the same model parameters should produce the same committed-output summaries when run at `-n 3` vs `-n 20`). Long-term, the goal is performance and speedup from additional ranks, but it has to be correct first.
+
 ## Project origin / disclaimer
 
 This project started as a paired-programming experiment with ChatGPT (GPT-5.2) over winter break 2025 to evaluate code generation capabilities.
@@ -117,6 +123,7 @@ Project docs live in `docs/`:
 - [docs/committed_output.md](docs/committed_output.md)
 - [docs/random.md](docs/random.md)
 - [docs/aoi.md](docs/aoi.md)
+- [docs/airplanes_missile_aoi_demo.md](docs/airplanes_missile_aoi_demo.md)
 
 ## Examples
 
