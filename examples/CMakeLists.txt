@@ -45,6 +45,16 @@ add_executable(warpdes_airport_fujimoto
 )
 target_link_libraries(warpdes_airport_fujimoto PRIVATE warpdes)
 
+add_executable(warpdes_regional_airport_migration_demo
+	regional_airport_migration_demo.cpp
+)
+target_link_libraries(warpdes_regional_airport_migration_demo PRIVATE warpdes)
+
+if(WARPSIM_ENABLE_MPI_TESTS)
+	target_link_libraries(warpdes_regional_airport_migration_demo PRIVATE MPI::MPI_CXX)
+	target_compile_definitions(warpdes_regional_airport_migration_demo PRIVATE WARPSIM_HAS_MPI=1)
+endif()
+
 if(WARPSIM_ENABLE_MPI_TESTS)
 	target_link_libraries(warpdes_airport_fujimoto PRIVATE MPI::MPI_CXX)
 	target_compile_definitions(warpdes_airport_fujimoto PRIVATE WARPSIM_HAS_MPI=1)
@@ -113,6 +123,33 @@ if(WARPSIM_ENABLE_MPI_TESTS)
 		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 5 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_airplanes_missile_aoi_demo> ${MPIEXEC_POSTFLAGS} --regions 4 --planes-per-region 8 --end 60 --seed 1 --query-every 1000
 	)
 
+	# Regional airport + migration example determinism across multiple rank counts.
+	add_test(
+		NAME warpdes.mpi_regional_airport_migration_2ranks
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_regional_airport_migration_demo> ${MPIEXEC_POSTFLAGS} --regions 14 --airports-per-region 2 --planes 112 --end 600 --service-max 5 --region-width 1000 --speed 25 --seed 1 --emit-plane-mod 8 --verify --expected-hash 4834955128110636547
+	)
+	add_test(
+		NAME warpdes.mpi_regional_airport_migration_4ranks
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_regional_airport_migration_demo> ${MPIEXEC_POSTFLAGS} --regions 14 --airports-per-region 2 --planes 112 --end 600 --service-max 5 --region-width 1000 --speed 25 --seed 1 --emit-plane-mod 8 --verify --expected-hash 4834955128110636547
+	)
+	add_test(
+		NAME warpdes.mpi_regional_airport_migration_6ranks
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 6 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_regional_airport_migration_demo> ${MPIEXEC_POSTFLAGS} --regions 14 --airports-per-region 2 --planes 112 --end 600 --service-max 5 --region-width 1000 --speed 25 --seed 1 --emit-plane-mod 8 --verify --expected-hash 4834955128110636547
+	)
+	add_test(
+		NAME warpdes.mpi_regional_airport_migration_8ranks
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 8 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_regional_airport_migration_demo> ${MPIEXEC_POSTFLAGS} --regions 14 --airports-per-region 2 --planes 112 --end 600 --service-max 5 --region-width 1000 --speed 25 --seed 1 --emit-plane-mod 8 --verify --expected-hash 4834955128110636547
+	)
+	add_test(
+		NAME warpdes.mpi_regional_airport_migration_10ranks
+		COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 10 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:warpdes_regional_airport_migration_demo> ${MPIEXEC_POSTFLAGS} --regions 14 --airports-per-region 2 --planes 112 --end 600 --service-max 5 --region-width 1000 --speed 25 --seed 1 --emit-plane-mod 8 --verify --expected-hash 4834955128110636547
+	)
+
 	set_tests_properties(warpdes.mpi_airplanes_missile_aoi_3ranks PROPERTIES TIMEOUT 45)
 	set_tests_properties(warpdes.mpi_airplanes_missile_aoi_5ranks PROPERTIES TIMEOUT 45)
+	set_tests_properties(warpdes.mpi_regional_airport_migration_2ranks PROPERTIES TIMEOUT 90)
+	set_tests_properties(warpdes.mpi_regional_airport_migration_4ranks PROPERTIES TIMEOUT 90)
+	set_tests_properties(warpdes.mpi_regional_airport_migration_6ranks PROPERTIES TIMEOUT 90)
+	set_tests_properties(warpdes.mpi_regional_airport_migration_8ranks PROPERTIES TIMEOUT 90)
+	set_tests_properties(warpdes.mpi_regional_airport_migration_10ranks PROPERTIES TIMEOUT 90)
 endif()

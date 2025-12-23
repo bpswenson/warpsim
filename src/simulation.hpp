@@ -1,10 +1,12 @@
 #pragma once
 
+#include "determinism.hpp"
 #include "event.hpp"
 #include "event_wire.hpp"
 #include "log.hpp"
 #include "lp.hpp"
 #include "migration.hpp"
+#include "optimistic_migration.hpp"
 #include "transport.hpp"
 
 #include <algorithm>
@@ -13,9 +15,11 @@
 #include <limits>
 #include <map>
 #include <memory>
+#include <optional>
 #include <queue>
 #include <set>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -110,6 +114,35 @@ namespace warpsim
         // - Anti-messages are also events; callers may choose to ignore `ev.isAnti`.
         std::function<void(RankId, LPId, const Event &)> committedEventSink;
 
+        // Optional: determinism oracle.
+        //
+        // If enabled, the kernel computes a commutative digest over (committed events, committed output)
+        // using DeterminismAccumulator. This is intended for cross-rank-count determinism checks.
+        //
+        // For MPI runs, callers can provide u64 reductions (sum/xor) to obtain a global digest.
+        bool enableDeterminismOracle = false;
+        std::function<std::uint64_t(std::uint64_t)> reduceU64Sum;
+        std::function<std::uint64_t(std::uint64_t)> reduceU64Xor;
+        std::optional<DeterminismDigest> expectedDeterminismDigest;
+
+        // Optional: deterministic priority between event classes at the same timestamp.
+        //
+        // If set, auto-assigned sequence numbers are constructed so that events for which
+        // `isControlEvent(ev)` is true will always order before other events at the same time.
+        // This is useful for migration control events like update-owner/install.
+        std::function<bool(const Event &)> isControlEvent;
+
+        // Optional: install-before-use buffering for optimistic migration.
+        //
+        // If enabled, and a model throws "World: unknown EntityId=..." while processing a
+        // targeted event, the kernel will defer that event until an install event for the
+        // same entity is successfully processed on the same LP.
+        //
+        // This is a pragmatic guardrail for optimistic migration setups where an entity can
+        // arrive (install) after other targeted events due to speculative forwarding.
+        bool enableInstallBeforeUseBuffering = false;
+        std::uint32_t installEventKind = optimistic_migration::DefaultInstallKind;
+
         // Enable extra runtime invariant checks (throws on violation).
 #if defined(WARPSIM_ENABLE_INVARIANT_CHECKS_DEFAULT)
         bool enableInvariantChecks = (WARPSIM_ENABLE_INVARIANT_CHECKS_DEFAULT != 0);
@@ -175,7 +208,8 @@ namespace warpsim
             LPContext ctx;
             ctx.lp = std::move(lp);
             ctx.vt = TimeStamp{0, 0};
-            ctx.nextSeq = 1;
+            ctx.nextSeqNormal = 1;
+            ctx.nextSeqControl = 1;
 
             m_lps.emplace(id, std::move(ctx));
 
@@ -281,6 +315,31 @@ namespace warpsim
                 // Flush any remaining committed output and release history.
                 prune_to_gvt_(max_stamp_());
                 apply_ready_migrations_();
+
+                if (m_cfg.enableDeterminismOracle)
+                {
+                    DeterminismDigest d = m_determinism.digest();
+                    if (m_cfg.reduceU64Sum)
+                    {
+                        d.committedEventSum = m_cfg.reduceU64Sum(d.committedEventSum);
+                        d.committedOutputSum = m_cfg.reduceU64Sum(d.committedOutputSum);
+                    }
+                    if (m_cfg.reduceU64Xor)
+                    {
+                        d.committedEventXor = m_cfg.reduceU64Xor(d.committedEventXor);
+                        d.committedOutputXor = m_cfg.reduceU64Xor(d.committedOutputXor);
+                    }
+
+                    if (m_cfg.expectedDeterminismDigest.has_value() && !(d == *m_cfg.expectedDeterminismDigest))
+                    {
+                        throw std::runtime_error("Determinism oracle failed: digest mismatch");
+                    }
+                }
+
+                if (m_cfg.enableInstallBeforeUseBuffering && !m_deferredTargeted.empty())
+                {
+                    throw std::runtime_error("Install-before-use buffering: simulation ended with deferred targeted events still pending (missing install?)");
+                }
             };
 
             const std::uint64_t period = (m_cfg.collectivePeriodIters == 0) ? 1 : m_cfg.collectivePeriodIters;
@@ -433,7 +492,38 @@ namespace warpsim
             if (ev.ts.sequence == 0)
             {
                 auto &ctx = ctx_(ev.src);
-                ev.ts.sequence = ctx.nextSeq++;
+
+                // Default behavior: legacy monotonic per-LP sequence (preserves existing tests).
+                if (!m_cfg.isControlEvent)
+                {
+                    ev.ts.sequence = ctx.nextSeqNormal++;
+                }
+                else
+                {
+                    const bool isControl = m_cfg.isControlEvent(ev);
+
+                    // Encode priority in the top bit of the sequence: control=0, normal=1.
+                    // This makes control events order before normal events at the same timestamp,
+                    // regardless of send order.
+                    if (isControl)
+                    {
+                        const std::uint64_t local = ctx.nextSeqControl++;
+                        if (local == 0)
+                        {
+                            throw std::runtime_error("Event sequence counter overflow for control events (exhausted 2^64-1 sequences)");
+                        }
+                        ev.ts.sequence = local;
+                    }
+                    else
+                    {
+                        const std::uint64_t local = ctx.nextSeqNormal++;
+                        if (local == 0)
+                        {
+                            throw std::runtime_error("Event sequence counter overflow for normal events (exhausted 2^64-1 sequences)");
+                        }
+                        ev.ts.sequence = (1ULL << 63) | local;
+                    }
+                }
             }
 
             // Entity routing indirection: if a migration has established an owner for this
@@ -592,7 +682,8 @@ namespace warpsim
             for (const auto &[id, ctx] : m_lps)
             {
                 (void)id;
-                invariant_or_throw_(ctx.nextSeq != 0, "invariant: nextSeq must be non-zero");
+                invariant_or_throw_(ctx.nextSeqNormal != 0, "invariant: nextSeqNormal must be non-zero");
+                invariant_or_throw_(ctx.nextSeqControl != 0, "invariant: nextSeqControl must be non-zero");
                 invariant_or_throw_(ctx.nextUid != 0, "invariant: nextUid must be non-zero");
 
                 // Processed records must be in non-decreasing timestamp order.
@@ -739,7 +830,8 @@ namespace warpsim
 
             // Rollback-able kernel metadata.
             // This is separate from Event.uid (which must never be reused).
-            std::uint64_t preNextSeq = 1;
+            std::uint64_t preNextSeqNormal = 1;
+            std::uint64_t preNextSeqControl = 1;
 
             bool hasLpSnapshot = false;
             ByteBuffer preLpState;
@@ -767,7 +859,8 @@ namespace warpsim
             std::deque<ProcessedRecord> processed;
             std::deque<SentRecord> sentLog;
 
-            std::uint64_t nextSeq = 1;
+            std::uint64_t nextSeqNormal = 1;
+            std::uint64_t nextSeqControl = 1;
             std::uint64_t nextUid = 1;
         };
 
@@ -805,6 +898,43 @@ namespace warpsim
         void enqueue_(Event ev)
         {
             m_pending.push(std::move(ev));
+        }
+
+        static bool is_missing_entity_error_(const std::exception &e) noexcept
+        {
+            // World throws: "World: unknown EntityId=...".
+            // Treat only this as an install-before-use buffering trigger.
+            const std::string_view msg(e.what());
+            return msg.rfind("World: unknown EntityId=", 0) == 0;
+        }
+
+        static std::uint64_t deferred_key_(LPId lp, EntityId entity) noexcept
+        {
+            return (static_cast<std::uint64_t>(lp) << 32) ^ static_cast<std::uint64_t>(entity);
+        }
+
+        void defer_targeted_event_(const Event &ev)
+        {
+            auto &q = m_deferredTargeted[deferred_key_(ev.dst, ev.target)];
+            q.push_back(ev);
+        }
+
+        void release_deferred_for_(LPId lp, EntityId entity)
+        {
+            const std::uint64_t key = deferred_key_(lp, entity);
+            auto it = m_deferredTargeted.find(key);
+            if (it == m_deferredTargeted.end())
+            {
+                return;
+            }
+
+            auto &q = it->second;
+            std::sort(q.begin(), q.end(), EventTimeOrder{});
+            for (auto &ev : q)
+            {
+                enqueue_(std::move(ev));
+            }
+            m_deferredTargeted.erase(it);
         }
 
         static constexpr TimeStamp max_stamp_() noexcept
@@ -912,6 +1042,14 @@ namespace warpsim
 
                     invariant_or_throw_(rec.ev.ts < gvt, "prune_to_gvt_: attempted to commit non-GVT-safe event");
 
+                    const LPId committedEventSrc = rec.ev.src;
+                    const EventUid committedEventUid = rec.ev.uid;
+
+                    if (m_cfg.enableDeterminismOracle)
+                    {
+                        m_determinism.on_committed_event(m_cfg.rank, id, rec.ev);
+                    }
+
                     if (m_cfg.committedEventSink)
                     {
                         committedEvents.push_back(CommittedEventFlushItem{
@@ -926,11 +1064,16 @@ namespace warpsim
                         for (std::size_t i = 0; i < rec.committed.size(); ++i)
                         {
                             auto &c = rec.committed[i];
+
+                            if (m_cfg.enableDeterminismOracle)
+                            {
+                                m_determinism.on_committed_output(m_cfg.rank, id, c.ts, c.payload);
+                            }
                             flush.push_back(CommittedFlushItem{
                                 .ts = c.ts,
                                 .lp = id,
-                                .eventSrc = rec.ev.src,
-                                .eventUid = rec.ev.uid,
+                                .eventSrc = committedEventSrc,
+                                .eventUid = committedEventUid,
                                 .index = static_cast<std::uint32_t>(i),
                                 .payload = std::move(c.payload),
                             });
@@ -1218,7 +1361,8 @@ namespace warpsim
 
                 ProcessedRecord rec;
                 rec.ev = ev;
-                rec.preNextSeq = dstCtx.nextSeq;
+                rec.preNextSeqNormal = dstCtx.nextSeqNormal;
+                rec.preNextSeqControl = dstCtx.nextSeqControl;
 
                 if (auto it = m_cancelledByUid.find(UidKey{ev.src, ev.uid}); it != m_cancelledByUid.end())
                 {
@@ -1262,7 +1406,8 @@ namespace warpsim
 
             ProcessedRecord rec;
             rec.ev = ev;
-            rec.preNextSeq = dstCtx.nextSeq;
+            rec.preNextSeqNormal = dstCtx.nextSeqNormal;
+            rec.preNextSeqControl = dstCtx.nextSeqControl;
 
             class EventContext final : public IEventContext
             {
@@ -1309,12 +1454,40 @@ namespace warpsim
 
             EventContext ctx(*this, dstCtx, rec);
 
-            dstCtx.vt = ev.ts;
-            dstCtx.inEvent = true;
-            dstCtx.currentExecTs = ev.ts;
-            dstCtx.lp->on_event(ev, ctx);
-            dstCtx.inEvent = false;
-            dstCtx.processed.push_back(std::move(rec));
+            const TimeStamp prevVt = dstCtx.vt;
+
+            try
+            {
+                dstCtx.vt = ev.ts;
+                dstCtx.inEvent = true;
+                dstCtx.currentExecTs = ev.ts;
+                dstCtx.lp->on_event(ev, ctx);
+                dstCtx.inEvent = false;
+                dstCtx.processed.push_back(std::move(rec));
+
+                if (m_cfg.enableInstallBeforeUseBuffering && ev.target != 0 && ev.payload.kind == m_cfg.installEventKind)
+                {
+                    release_deferred_for_(ev.dst, ev.target);
+                }
+            }
+            catch (const std::exception &e)
+            {
+                dstCtx.inEvent = false;
+
+                if (m_cfg.enableInstallBeforeUseBuffering && ev.target != 0 && ev.payload.kind != m_cfg.installEventKind &&
+                    is_missing_entity_error_(e))
+                {
+                    // The model could not process this targeted event because the entity is not present yet.
+                    // Do not advance local virtual time; defer until install arrives.
+                    dstCtx.vt = prevVt;
+                    dstCtx.currentExecTs = prevVt;
+                    defer_targeted_event_(ev);
+                    validate_invariants_("dispatch:exit_deferred_missing_entity");
+                    return;
+                }
+
+                throw;
+            }
 
             ++m_totalProcessed;
 
@@ -1396,7 +1569,8 @@ namespace warpsim
                 const auto &oldest = undone.back();
 
                 // Restore rollback-able kernel metadata.
-                ctx.nextSeq = oldest.preNextSeq;
+                ctx.nextSeqNormal = oldest.preNextSeqNormal;
+                ctx.nextSeqControl = oldest.preNextSeqControl;
 
                 // Restore LP state. The oldest undone record may be an anti-message (no snapshot),
                 // but later undone records may have mutated state. Use the oldest undone record
@@ -1500,6 +1674,12 @@ namespace warpsim
         // GVT-safe entity migration: migrations are applied only once GVT >= effectiveTs.
         std::multimap<TimeStamp, Migration> m_pendingMigrations;
         std::unordered_map<EntityId, LPId> m_entityOwner;
+
+        DeterminismAccumulator m_determinism;
+
+        // Deferred targeted events (install-before-use buffering).
+        // Key is (dst LPId, EntityId) packed into u64.
+        std::unordered_map<std::uint64_t, std::vector<Event>> m_deferredTargeted;
 
         // Conservative single-rank GVT accounts for messages delayed in the transport.
         std::unordered_map<InflightKey, TimeStamp, InflightKeyHash> m_inflightByUid;

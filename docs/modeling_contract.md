@@ -125,6 +125,15 @@ Tip:
 
 - Use `modeling::send_targeted(...)` / `modeling::make_targeted_event(...)` from [src/modeling.hpp](../src/modeling.hpp) so model code does not need to guess the current owner LP.
 
+Behavioral details:
+
+- Targeted events are routed either via the directory LP (recommended for migration) or via a known owner map.
+- In optimistic runs, targeted events may be forwarded speculatively to an LP before the entity install arrives.
+- If enabled in the host config, the kernel can buffer targeted events that would otherwise fail with `World: unknown EntityId=...` until the install event is processed.
+- If enabled in the host config, the kernel can enforce deterministic “control event first” ordering (e.g., update-owner/install before normal events at the same timestamp).
+
+See [migration.md](migration.md) for the full end-to-end routing flow and configuration examples.
+
 Important:
 
 - Only use targeted-event routing if your run config enables it (e.g., `SimulationConfig::directoryForEntity` is set, or entity ownership is otherwise tracked). Without routing, sending with an unknown destination cannot be made correct.
