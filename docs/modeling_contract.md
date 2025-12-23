@@ -39,6 +39,13 @@ Rule:
 
 - Before you mutate rollback-relevant state, call `ctx.request_write(entityId)`.
 
+Notes:
+
+- If your LP overrides `supports_entity_snapshots()` and implements `save_entity/load_entity`, the kernel can snapshot only the entities you touch.
+- Otherwise it falls back to an LP-wide snapshot via `save_state/load_state`.
+
+More detail: [state_store.md](state_store.md).
+
 Tip:
 
 - Use the helper `modeling::write(ctx, entityId)` from [src/modeling.hpp](../src/modeling.hpp) to make this hard to forget.

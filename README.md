@@ -8,6 +8,7 @@ Core features:
 - Optional **MPI transport** for multi-process runs
 - **Deterministic event UIDs** (tied to LPId, not MPI rank)
 - **Committed output**: GVT-safe side effects emitted exactly once
+- **State snapshots** for rollback: LP-wide `save_state/load_state` and optional per-entity `save_entity/load_entity` (triggered by `ctx.request_write(entityId)`)
 - Optional higher-level modeling patterns (e.g., AOI LP pattern) and examples
 
 This repo builds a library (`warpdes`) plus unit tests and examples under `tests/` and `examples/`.
@@ -112,6 +113,7 @@ Project docs live in `docs/`:
 - [docs/modeler_intro.md](docs/modeler_intro.md)
 - [docs/modeling_contract.md](docs/modeling_contract.md)
 - [docs/integrating_with_cmake.md](docs/integrating_with_cmake.md)
+- [docs/state_store.md](docs/state_store.md)
 - [docs/committed_output.md](docs/committed_output.md)
 - [docs/random.md](docs/random.md)
 - [docs/aoi.md](docs/aoi.md)

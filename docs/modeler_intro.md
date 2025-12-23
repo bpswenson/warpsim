@@ -15,6 +15,8 @@ The most important takeaway:
 
 Start with [modeling_contract.md](modeling_contract.md).
 
+If you want more detail on how rollback snapshots relate to entities and `ctx.request_write(...)`, see [state_store.md](state_store.md).
+
 ## Quick glossary (practical)
 
 WarpSim has a few core concepts; model code reads much easier once these click:
